@@ -5,7 +5,6 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"mime"
 	"net/http"
 	"net/url"
 	"os"
@@ -23,6 +22,19 @@ const (
 	errPrefixTransport = "ohttp-transport: "
 	errPrefixDecrypt   = "ohttp-decrypt: "
 )
+
+// prefixForKind maps a doOHTTPRoundTrip error kind to its vegeta-error prefix.
+// errKindNone returns "" — caller should only invoke this when err != nil.
+func prefixForKind(kind ohttpErrKind) string {
+	switch kind {
+	case errKindTransport:
+		return errPrefixTransport
+	case errKindDecrypt:
+		return errPrefixDecrypt
+	default:
+		return ""
+	}
+}
 
 type loadSummary struct {
 	PostURL    string
@@ -60,45 +72,9 @@ func (t *ohttpRoundTripper) RoundTrip(req *http.Request) (*http.Response, error)
 		return nil, fmt.Errorf("%smarshal BHTTP: %w", errPrefixDecrypt, err)
 	}
 
-	ohttpClient := ohttp.NewDefaultClient(t.config)
-	encReq, encCtx, err := ohttpClient.EncapsulateRequest(bhttpBytes)
+	plaintext, kind, err := doOHTTPRoundTrip(req.Context(), t.inner, t.postURL, t.config, bhttpBytes)
 	if err != nil {
-		return nil, fmt.Errorf("%sencapsulate: %w", errPrefixDecrypt, err)
-	}
-	ciphertext := encReq.Marshal()
-
-	post, err := http.NewRequestWithContext(req.Context(), http.MethodPost, t.postURL, bytes.NewReader(ciphertext))
-	if err != nil {
-		return nil, fmt.Errorf("%sbuild POST: %w", errPrefixTransport, err)
-	}
-	post.Header.Set("Content-Type", "message/ohttp-req")
-
-	resp, err := t.inner.Do(post)
-	if err != nil {
-		return nil, fmt.Errorf("%s%w", errPrefixTransport, err)
-	}
-	defer func() { _ = resp.Body.Close() }()
-
-	body, err := readBody(resp)
-	if err != nil {
-		return nil, fmt.Errorf("%sread outer body: %w", errPrefixTransport, err)
-	}
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("%souter HTTP %d", errPrefixTransport, resp.StatusCode)
-	}
-
-	mediaType, _, _ := mime.ParseMediaType(resp.Header.Get("Content-Type"))
-	if mediaType != "message/ohttp-res" {
-		return nil, fmt.Errorf("%sunexpected Content-Type %q", errPrefixDecrypt, resp.Header.Get("Content-Type"))
-	}
-
-	encapResp, err := ohttp.UnmarshalEncapsulatedResponse(body)
-	if err != nil {
-		return nil, fmt.Errorf("%sunmarshal encapsulated: %w", errPrefixDecrypt, err)
-	}
-	plaintext, err := encCtx.DecapsulateResponse(encapResp)
-	if err != nil {
-		return nil, fmt.Errorf("%sdecapsulate: %w", errPrefixDecrypt, err)
+		return nil, fmt.Errorf("%s%w", prefixForKind(kind), err)
 	}
 
 	innerResp, err := ohttp.UnmarshalBinaryResponse(plaintext)
