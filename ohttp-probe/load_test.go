@@ -51,10 +51,8 @@ func TestClassifyBuckets(t *testing.T) {
 
 func TestPrintLoadSummaryBasic(t *testing.T) {
 	s := loadSummary{
-		PostURL:    "https://relay.example.com/foo",
-		Mode:       modeRelay,
-		TargetHost: "indexer.us.example.com",
-		TargetPath: "/health",
+		RelayURL:   "https://relay.example.com/foo",
+		TargetURL:  "https://indexer.us.example.com/health",
 		Duration:   10 * time.Second,
 		QPS:        20,
 		Elapsed:    10 * time.Second,
@@ -74,7 +72,7 @@ func TestPrintLoadSummaryBasic(t *testing.T) {
 	printLoadSummary(&buf, s)
 	out := buf.String()
 	for _, want := range []string{
-		"mode:         relay",
+		"target URL:   https://indexer.us.example.com/health",
 		"rate:         20 rps",
 		"requests:     100",
 		"success:      95",
@@ -91,10 +89,11 @@ func TestPrintLoadSummaryBasic(t *testing.T) {
 
 func TestPrintLoadSummaryNoRequests(t *testing.T) {
 	s := loadSummary{
-		Mode:     modeRelay,
-		Duration: time.Second,
-		QPS:      10,
-		Elapsed:  time.Second,
+		RelayURL:  "https://relay.example.com/foo",
+		TargetURL: "https://target.example.com/health",
+		Duration:  time.Second,
+		QPS:       10,
+		Elapsed:   time.Second,
 	}
 	var buf bytes.Buffer
 	printLoadSummary(&buf, s)
@@ -107,7 +106,7 @@ func TestPrintLoadSummaryNoRequests(t *testing.T) {
 	}
 }
 
-func TestRunLoadIntegration(t *testing.T) {
+func TestExecuteLoadIntegration(t *testing.T) {
 	gw := newTestGateway(t)
 	backend := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
@@ -118,14 +117,14 @@ func TestRunLoadIntegration(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 
-	err := runLoad(ctx, http.DefaultClient, relaySrv.URL, keysSrv.URL, "example.com", "/health",
-		modeRelay, 20, 300*time.Millisecond, false)
+	err := executeLoad(ctx, http.DefaultClient, relaySrv.URL, keysSrv.URL,
+		"https://example.com/health", 20, 300*time.Millisecond, false)
 	if err != nil {
-		t.Fatalf("runLoad: unexpected error: %v", err)
+		t.Fatalf("executeLoad: unexpected error: %v", err)
 	}
 }
 
-func TestRunLoadRate(t *testing.T) {
+func TestExecuteLoadRate(t *testing.T) {
 	gw := newTestGateway(t)
 	var served int32
 	backend := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -140,10 +139,10 @@ func TestRunLoadRate(t *testing.T) {
 
 	// 10 rps for 500ms -> ~5 requests. vegeta's open-model attacker fires
 	// on a constant-rate schedule; accept a wide 2-15 band for jitter.
-	err := runLoad(ctx, http.DefaultClient, relaySrv.URL, keysSrv.URL, "example.com", "/health",
-		modeRelay, 10, 500*time.Millisecond, false)
+	err := executeLoad(ctx, http.DefaultClient, relaySrv.URL, keysSrv.URL,
+		"https://example.com/health", 10, 500*time.Millisecond, false)
 	if err != nil {
-		t.Fatalf("runLoad: unexpected error: %v", err)
+		t.Fatalf("executeLoad: unexpected error: %v", err)
 	}
 	n := atomic.LoadInt32(&served)
 	if n < 2 || n > 15 {
@@ -151,7 +150,7 @@ func TestRunLoadRate(t *testing.T) {
 	}
 }
 
-func TestRunLoadInnerHTTPErrors(t *testing.T) {
+func TestExecuteLoadInnerHTTPErrors(t *testing.T) {
 	gw := newTestGateway(t)
 	backend := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "nope", http.StatusInternalServerError)
@@ -161,8 +160,8 @@ func TestRunLoadInnerHTTPErrors(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 
-	err := runLoad(ctx, http.DefaultClient, relaySrv.URL, keysSrv.URL, "example.com", "/health",
-		modeRelay, 20, 200*time.Millisecond, false)
+	err := executeLoad(ctx, http.DefaultClient, relaySrv.URL, keysSrv.URL,
+		"https://example.com/health", 20, 200*time.Millisecond, false)
 	if err == nil {
 		t.Fatal("expected non-nil error when all requests return inner 5xx")
 	}
@@ -171,12 +170,12 @@ func TestRunLoadInnerHTTPErrors(t *testing.T) {
 	}
 }
 
-func TestRunLoadKeysUnreachable(t *testing.T) {
+func TestExecuteLoadKeysUnreachable(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
 	defer cancel()
 
-	err := runLoad(ctx, http.DefaultClient, "http://127.0.0.1:1", "http://127.0.0.1:1/keys",
-		"example.com", "/health", modeRelay, 10, 200*time.Millisecond, false)
+	err := executeLoad(ctx, http.DefaultClient, "http://127.0.0.1:1", "http://127.0.0.1:1/keys",
+		"https://example.com/health", 10, 200*time.Millisecond, false)
 	if err == nil {
 		t.Fatal("expected key fetch to fail")
 	}

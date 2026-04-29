@@ -1,173 +1,129 @@
 # ohttp-probe
 
 CLI tool to test [Oblivious HTTP (RFC 9458)](https://www.rfc-editor.org/rfc/rfc9458.html) gateways.
-It fetches the OHTTP key configuration, encrypts a test payload using HPKE, sends it to the gateway,
-and verifies the decrypted response matches.
+It fetches the OHTTP key configuration, encapsulates a request using HPKE, sends it to the gateway
+(directly or via a relay), and verifies the decrypted response.
 
 ## Requirements
 
 - Go 1.26+
-- [Task](https://taskfile.dev) v3+
 
-## Quick start
+## Build
 
 ```sh
 cd ohttp-probe
-
-task build              # build the binary
-task test-backends      # probe every staging backend /health via relay
-task test-backends-prod # probe every production backend /health via relay
+go build .
 ```
 
-## Modes
+## Commands
 
-The probe has three modes, selected by `-mode`:
+The probe has three subcommands. Each has its own `-h` for command-specific
+flags. There is no `-mode` flag — relay vs direct-to-gateway is chosen by
+which URL you pass to `-relay-url`.
 
-### `-mode echo` (default)
+### `echo`
 
-POSTs an HPKE-encrypted payload directly to the gateway ALB's `/gateway-echo`
-endpoint and verifies the decrypted response equals the original payload.
-Pure crypto round-trip — no backend involved, no relay:
+POSTs an HPKE-encrypted payload to each `-gateway-url`'s `/gateway-echo`
+endpoint and verifies the decrypted response equals the payload. Pure crypto
+round-trip — no backend, no relay. The gateway must accept unauthenticated
+requests on its OHTTP listener for echo to work (in a Cloudflare-fronted
+deployment this typically means temporarily disabling the ALB's mTLS).
 
 ```sh
-./ohttp-probe -mode echo https://ohttp-stage.us.id-infra.worldcoin.dev
-./ohttp-probe -mode echo -v -p "test-123" -t 30s \
-  https://ohttp-stage.us.id-infra.worldcoin.dev \
-  https://ohttp-stage.eu.id-infra.worldcoin.dev
+./ohttp-probe echo -v \
+  -gateway-url https://gateway.example.com \
+  -gateway-url https://gateway.eu.example.com
 ```
 
-Echo mode talks to the ALB directly, so it only passes when infra has
-temporarily set `open_to_all = true; mtls_enabled = false` on the ALB for
-debugging.
+### `probe`
 
-### `-mode relay`
-
-Sends a BHTTP-encoded inner request through the Cloudflare Privacy Gateway
-relay. The inner request targets a real backend (specified via `-target`):
+Sends one BHTTP-encoded inner GET per `-target-url` through `-relay-url`.
+Targets are probed concurrently; exit code is non-zero if any fail. The
+relay can be an [Oblivious Privacy Relay](https://blog.cloudflare.com/announcing-cloudflare-privacy-gateway/)
+URL, a gateway's `/gateway` endpoint (direct mode), or any RFC 9458 server.
 
 ```sh
-./ohttp-probe -mode relay -v \
-  -keys https://ohttp-keys.us.id-infra.worldcoin.dev/ohttp-keys \
-  -target gateway.us.id-infra.worldcoin.dev \
-  -target-path /health \
-  https://staging.privacy-relay.cloudflare.com/us-world-id-stage
+# Through an Oblivious Relay
+./ohttp-probe probe -v \
+  -relay-url https://relay.example.com/some-tenant \
+  -keys-url https://gateway.example.com/ohttp-keys \
+  -target-url https://api.example.com/health \
+  -target-url https://other-api.example.com/health
+
+# Direct to the gateway (no relay leg)
+./ohttp-probe probe -v \
+  -relay-url https://gateway.example.com/gateway \
+  -keys-url https://gateway.example.com/ohttp-keys \
+  -target-url https://api.example.com/health
 ```
 
-This exercises the full client → relay → gateway → backend path and is the
-closest thing to what real wallets do.
+Useful for isolating whether a failure lives in the relay leg or the
+gateway-and-below part of the stack: probe through the relay, then
+direct to the gateway, and compare.
 
-### `-mode direct`
+### `load`
 
-Same as relay mode, but the encrypted request is POSTed straight to the
-gateway ALB's `/gateway` endpoint, bypassing the Cloudflare relay. Requires
-ALB mTLS temporarily disabled (same caveat as echo mode):
-
-```sh
-./ohttp-probe -mode direct -v \
-  -keys https://ohttp-keys.us.id-infra.worldcoin.dev/ohttp-keys \
-  -target indexer.us.id-infra.worldcoin.dev \
-  -target-path /health \
-  https://ohttp-stage.us.id-infra.worldcoin.dev
-```
-
-Useful for isolating whether a failure lives in the Cloudflare relay leg or
-the gateway-and-below part of the stack.
-
-## Load mode (`-load`)
-
-Drives `relay` or `direct` mode at `-qps` requests per second for `-duration`
-using [vegeta](https://github.com/tsenart/vegeta)'s open-model attacker —
-workers grow organically with offered load, so tail latency isn't masked by a
-fixed worker pool. Keys are fetched once up-front. Prints a plain-text summary
-with p50/p95/p99 latency and per-category error counts. Abort with `Ctrl-C`.
-
-Echo mode is rejected under `-load` — it skips the backend and relay, so load
-numbers would reflect only the gateway's HPKE encrypt/decrypt cost, not the
-path real clients exercise.
+Drives a single `-target-url` through `-relay-url` at `-qps` requests per
+second for `-duration`, using
+[vegeta](https://github.com/tsenart/vegeta)'s open-model attacker — workers
+grow with offered load, so tail latency isn't masked by a fixed worker
+pool. Keys are fetched once up-front. Prints a plain-text summary with
+p50/p95/p99 latency and per-category error counts. Abort with `Ctrl-C`.
 
 ```sh
-./ohttp-probe -mode relay -load \
-  -qps 20 -duration 30s \
-  -keys https://ohttp-keys.us.id-infra.worldcoin.dev/ohttp-keys \
-  -target indexer.us.id-infra.worldcoin.dev \
-  -target-path /health \
-  https://staging.privacy-relay.cloudflare.com/us-world-id-stage
+./ohttp-probe load \
+  -relay-url https://relay.example.com/some-tenant \
+  -keys-url https://gateway.example.com/ohttp-keys \
+  -target-url https://api.example.com/health \
+  -qps 20 -duration 30s
 ```
 
 Error categories in the summary:
 
-- `transport` — TCP/TLS errors, client timeouts, outer non-200 from the relay or ALB
+- `transport` — TCP/TLS errors, client timeouts, outer non-200 from the relay or gateway
 - `decrypt` — content-type mismatches, OHTTP/BHTTP unmarshal, HPKE decapsulate failures
 - `inner HTTP` — successful OHTTP round-trip where the decrypted inner response is non-2xx
 
-## Flags
+## Shared concepts
 
-| Flag | Default | Description |
-|------|---------|-------------|
-| `-mode` | `echo` | One of `echo`, `relay`, `direct` |
-| `-p` | `hello from ohttp-probe` | Payload to send via `/gateway-echo` (echo mode only) |
-| `-t` | `10s` | HTTP timeout |
-| `-health` | `false` | Only check `/health` on the base URL (skip OHTTP crypto) |
-| `-keys` | | URL to fetch OHTTP keys from (required for `-mode relay` and `-mode direct`) |
-| `-target` | | Target origin for inner BHTTP request (required for `-mode relay` and `-mode direct`) |
-| `-target-path` | `/health` | Path to request on the target origin (relay/direct modes) |
-| `-v` | `false` | Verbose output |
-| `-load` | `false` | Run as load test (requires `-mode relay` or `-mode direct`) |
-| `-duration` | `30s` | Load test duration (load mode) |
-| `-qps` | | Target requests per second (load mode; required, open-model attacker) |
+Three URL flags appear across the subcommands. The relationship between
+them is:
 
-## Task targets
-
-| Target | Description |
-|--------|-------------|
-| `task test-backends` | Probe every staging backend (`indexer` all regions + `gateway` US) `/health` via Cloudflare Privacy Gateway |
-| `task test-backends-prod` | Probe every production backend `/health` via Cloudflare Privacy Gateway |
-| `task test-backends-direct` | Probe every staging backend `/health` directly on the gateway ALB (requires ALB mTLS disabled) |
-| `task test-backends-direct-prod` | Probe every production backend `/health` directly on the gateway ALB (requires ALB mTLS disabled) |
-| `task test-echo` | Probe every staging gateway `/gateway-echo` directly (requires ALB mTLS disabled) |
-| `task test-echo-prod` | Probe every production gateway `/gateway-echo` directly (requires ALB mTLS disabled) |
-| `task load` | Load-test a staging region via the Cloudflare Privacy Gateway relay |
-| `task load-prod` | Load-test a production region via the Cloudflare Privacy Gateway relay (coordinate with infra on CF quota) |
-
-### Load task overrides
-
-Both `load` targets accept CLI variables to tune the run. Defaults:
-`REGION=us`, `DURATION=30s`, `QPS=10`,
-`TARGET_HOST=indexer.<REGION>.id-infra.<env>`.
-
-```sh
-# Default: stage us indexer, 30s at 10 rps
-task load
-
-# EU stage, 60s at 50 rps
-task load REGION=eu DURATION=60s QPS=50
-
-# Prod us gateway instead of indexer
-task load-prod TARGET_HOST=gateway.us.id-infra.world.org
 ```
+client → POST <relay-url> → gateway → GET <target-url>
+                ↑
+       <keys-url> serves the gateway's HPKE key config
+```
+
+| Flag | Description |
+|---|---|
+| `-relay-url` | URL the OHTTP request is POSTed to. Privacy relay, gateway `/gateway` endpoint, or any RFC 9458 server. |
+| `-keys-url` | URL of the gateway's OHTTP key config (e.g. `https://<gateway>/ohttp-keys`). |
+| `-target-url` | Full URL of the inner target the BHTTP request is forwarded to. Repeatable in `probe`; single in `load`. |
+| `-gateway-url` | Echo-only: gateway base URL. Probe POSTs to `<gateway-url>/gateway-echo`; keys are read from `<gateway-url>/ohttp-keys`. Repeatable. |
+
+Inner request method is always `GET` — the tool tests OHTTP setup, not
+arbitrary endpoint behavior.
 
 ## How it works
 
-### Echo mode
+### Echo (`echo`)
 
-1. **Fetch keys** — `GET /ohttp-keys` returns the gateway's HPKE public key config
+1. **Fetch keys** — `GET <gateway-url>/ohttp-keys` returns the gateway's HPKE public key config
 2. **Encrypt** — the payload is encapsulated using OHTTP (HPKE)
-3. **Send** — `POST /gateway-echo` with `Content-Type: message/ohttp-req`
+3. **Send** — `POST <gateway-url>/gateway-echo` with `Content-Type: message/ohttp-req`
 4. **Decrypt** — the encrypted response is decapsulated and compared to the original payload
 
-### Relay mode
+### Probe (`probe`) and load (`load`)
 
 1. **Fetch keys** — `GET <keys-url>` returns the gateway's HPKE public key config
-2. **Build inner request** — a BHTTP-encoded `GET <target-path>` with `Host: <target>`
+2. **Build inner request** — a BHTTP-encoded `GET` of `-target-url`
 3. **Encrypt** — the BHTTP request is encapsulated using OHTTP
-4. **Send** — `POST <relay-url>` with `Content-Type: message/ohttp-req`; Cloudflare forwards the blob to the gateway, which decrypts, forwards the inner HTTP request to the target, and re-encrypts the response
-5. **Decrypt** — the OHTTP response is decapsulated, the inner BHTTP response is parsed, and the HTTP status is verified
-
-### Direct-BHTTP mode
-
-Identical to relay mode except step 4 POSTs to `<base>/gateway` on the gateway ALB instead of the Cloudflare relay URL.
+4. **Send** — `POST <relay-url>` with `Content-Type: message/ohttp-req`. The relay (or the gateway directly) forwards the blob to the gateway, which decrypts, dispatches the inner HTTP request to the target, and re-encrypts the response.
+5. **Decrypt** — the OHTTP response is decapsulated, the inner BHTTP response is parsed, and the inner HTTP status is verified
 
 ## Exit codes
 
 - `0` — all probes passed
 - `1` — one or more probes failed
+- `2` — flag parse error / missing required argument

@@ -40,10 +40,6 @@ func newOHTTPServer(t *testing.T, gw ohttp.Gateway) *httptest.Server {
 	keyConfigs := gw.MarshalConfigs()
 
 	mux := http.NewServeMux()
-	mux.HandleFunc(pathHealth, func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte("ok"))
-	})
 	mux.HandleFunc(pathOHTTPKeys, func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/ohttp-keys")
 		_, _ = w.Write(keyConfigs)
@@ -78,33 +74,6 @@ func newOHTTPServer(t *testing.T, gw ohttp.Gateway) *httptest.Server {
 	})
 
 	return httptest.NewServer(mux)
-}
-
-func TestProbeHealthOK(t *testing.T) {
-	gw := newTestGateway(t)
-	srv := newOHTTPServer(t, gw)
-	defer srv.Close()
-
-	err := probeHealth(context.Background(), srv.Client(), srv.URL, false)
-	if err != nil {
-		t.Fatalf("expected no error, got: %v", err)
-	}
-}
-
-func TestProbeHealthNon200(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusServiceUnavailable)
-		_, _ = w.Write([]byte("down"))
-	}))
-	defer srv.Close()
-
-	err := probeHealth(context.Background(), srv.Client(), srv.URL, false)
-	if err == nil {
-		t.Fatal("expected error for non-200")
-	}
-	if !strings.Contains(err.Error(), "503") {
-		t.Fatalf("expected 503 in error, got: %v", err)
-	}
 }
 
 func TestProbeOHTTPOK(t *testing.T) {
@@ -328,6 +297,18 @@ func newRelayServer(t *testing.T, gw ohttp.Gateway, backend http.Handler) (*http
 	return relaySrv, keysSrv
 }
 
+// fetchTestKeys grabs the gateway's key config from a test server. Used by
+// probeBHTTP tests, which now take a pre-fetched config (probe.go's runProbe
+// fetches keys once up-front and shares across targets).
+func fetchTestKeys(t *testing.T, keysURL string) ohttp.PublicConfig {
+	t.Helper()
+	cfg, err := fetchKeys(context.Background(), http.DefaultClient, keysURL, false)
+	if err != nil {
+		t.Fatalf("fetch keys: %v", err)
+	}
+	return cfg
+}
+
 func TestProbeRelayOK(t *testing.T) {
 	gw := newTestGateway(t)
 	backend := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -335,10 +316,14 @@ func TestProbeRelayOK(t *testing.T) {
 		_, _ = w.Write([]byte("ok"))
 	})
 	relaySrv, keysSrv := newRelayServer(t, gw, backend)
+	cfg := fetchTestKeys(t, keysSrv.URL)
 
-	err := probeBHTTP(context.Background(), http.DefaultClient, relaySrv.URL, keysSrv.URL, "example.com", "/health", modeRelay, false)
+	code, err := probeBHTTP(context.Background(), http.DefaultClient, relaySrv.URL, cfg, "https://example.com/health", false)
 	if err != nil {
 		t.Fatalf("expected no error, got: %v", err)
+	}
+	if code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", code)
 	}
 }
 
@@ -349,9 +334,9 @@ func TestProbeRelayOKVerbose(t *testing.T) {
 		_, _ = w.Write([]byte("healthy"))
 	})
 	relaySrv, keysSrv := newRelayServer(t, gw, backend)
+	cfg := fetchTestKeys(t, keysSrv.URL)
 
-	err := probeBHTTP(context.Background(), http.DefaultClient, relaySrv.URL, keysSrv.URL, "example.com", "/health", modeRelay, true)
-	if err != nil {
+	if _, err := probeBHTTP(context.Background(), http.DefaultClient, relaySrv.URL, cfg, "https://example.com/health", true); err != nil {
 		t.Fatalf("expected no error, got: %v", err)
 	}
 }
@@ -367,9 +352,9 @@ func TestProbeRelayCustomPath(t *testing.T) {
 		_, _ = w.Write([]byte("ok"))
 	})
 	relaySrv, keysSrv := newRelayServer(t, gw, backend)
+	cfg := fetchTestKeys(t, keysSrv.URL)
 
-	err := probeBHTTP(context.Background(), http.DefaultClient, relaySrv.URL, keysSrv.URL, "example.com", "/v2/status", modeRelay, false)
-	if err != nil {
+	if _, err := probeBHTTP(context.Background(), http.DefaultClient, relaySrv.URL, cfg, "https://example.com/v2/status", false); err != nil {
 		t.Fatalf("expected no error, got: %v", err)
 	}
 }
@@ -380,10 +365,14 @@ func TestProbeRelayInnerNon2xx(t *testing.T) {
 		http.Error(w, "service unavailable", http.StatusServiceUnavailable)
 	})
 	relaySrv, keysSrv := newRelayServer(t, gw, backend)
+	cfg := fetchTestKeys(t, keysSrv.URL)
 
-	err := probeBHTTP(context.Background(), http.DefaultClient, relaySrv.URL, keysSrv.URL, "example.com", "/health", modeRelay, false)
+	code, err := probeBHTTP(context.Background(), http.DefaultClient, relaySrv.URL, cfg, "https://example.com/health", false)
 	if err == nil {
 		t.Fatal("expected error for non-2xx inner response")
+	}
+	if code != http.StatusServiceUnavailable {
+		t.Fatalf("expected code=503, got %d", code)
 	}
 	if !strings.Contains(err.Error(), "503") {
 		t.Fatalf("expected 503 in error, got: %v", err)
@@ -403,33 +392,14 @@ func TestProbeRelayRelayNon200(t *testing.T) {
 		http.Error(w, "Forbidden", http.StatusForbidden)
 	}))
 	defer relaySrv.Close()
+	cfg := fetchTestKeys(t, keysSrv.URL)
 
-	err := probeBHTTP(context.Background(), http.DefaultClient, relaySrv.URL, keysSrv.URL, "example.com", "/health", modeRelay, false)
+	_, err := probeBHTTP(context.Background(), http.DefaultClient, relaySrv.URL, cfg, "https://example.com/health", false)
 	if err == nil {
 		t.Fatal("expected error for relay 403")
 	}
 	if !strings.Contains(err.Error(), "403") {
 		t.Fatalf("expected 403 in error, got: %v", err)
-	}
-}
-
-func TestProbeRelayKeysNon200(t *testing.T) {
-	keysSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		http.Error(w, "not found", http.StatusNotFound)
-	}))
-	defer keysSrv.Close()
-
-	relaySrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		t.Fatal("relay should not be called when keys fail")
-	}))
-	defer relaySrv.Close()
-
-	err := probeBHTTP(context.Background(), http.DefaultClient, relaySrv.URL, keysSrv.URL, "example.com", "/health", modeRelay, false)
-	if err == nil {
-		t.Fatal("expected error for keys 404")
-	}
-	if !strings.Contains(err.Error(), "404") {
-		t.Fatalf("expected 404 in error, got: %v", err)
 	}
 }
 
@@ -447,8 +417,9 @@ func TestProbeRelayWrongContentType(t *testing.T) {
 		_, _ = w.Write([]byte("not-ohttp"))
 	}))
 	defer relaySrv.Close()
+	cfg := fetchTestKeys(t, keysSrv.URL)
 
-	err := probeBHTTP(context.Background(), http.DefaultClient, relaySrv.URL, keysSrv.URL, "example.com", "/health", modeRelay, false)
+	_, err := probeBHTTP(context.Background(), http.DefaultClient, relaySrv.URL, cfg, "https://example.com/health", false)
 	if err == nil {
 		t.Fatal("expected content-type error")
 	}
@@ -465,9 +436,9 @@ func TestProbeRelayVerifiesTargetHost(t *testing.T) {
 		w.WriteHeader(http.StatusOK)
 	})
 	relaySrv, keysSrv := newRelayServer(t, gw, backend)
+	cfg := fetchTestKeys(t, keysSrv.URL)
 
-	err := probeBHTTP(context.Background(), http.DefaultClient, relaySrv.URL, keysSrv.URL, "gateway.us.id-infra.worldcoin.dev", "/health", modeRelay, false)
-	if err != nil {
+	if _, err := probeBHTTP(context.Background(), http.DefaultClient, relaySrv.URL, cfg, "https://gateway.us.id-infra.worldcoin.dev/health", false); err != nil {
 		t.Fatalf("expected no error, got: %v", err)
 	}
 	if receivedHost != "gateway.us.id-infra.worldcoin.dev" {
@@ -533,25 +504,6 @@ func TestFetchKeysContextCancelled(t *testing.T) {
 	cancel()
 
 	_, err := fetchKeys(ctx, srv.Client(), srv.URL, false)
-	if err == nil {
-		t.Fatal("expected error for cancelled context")
-	}
-}
-
-// ---------------------------------------------------------------------------
-// probeHealth (additional)
-// ---------------------------------------------------------------------------
-
-func TestProbeHealthContextCancelled(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
-	}))
-	defer srv.Close()
-
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-
-	err := probeHealth(ctx, srv.Client(), srv.URL, false)
 	if err == nil {
 		t.Fatal("expected error for cancelled context")
 	}
@@ -658,7 +610,7 @@ func TestReadBodyExactLimit(t *testing.T) {
 	}
 }
 
-func TestValidateBaseURL(t *testing.T) {
+func TestValidateURL(t *testing.T) {
 	tests := []struct {
 		input   string
 		wantErr bool
@@ -672,9 +624,9 @@ func TestValidateBaseURL(t *testing.T) {
 	}
 
 	for _, tt := range tests {
-		err := validateBaseURL(tt.input)
+		err := validateURL(tt.input)
 		if (err != nil) != tt.wantErr {
-			t.Errorf("validateBaseURL(%q) error=%v, wantErr=%v", tt.input, err, tt.wantErr)
+			t.Errorf("validateURL(%q) error=%v, wantErr=%v", tt.input, err, tt.wantErr)
 		}
 	}
 }
