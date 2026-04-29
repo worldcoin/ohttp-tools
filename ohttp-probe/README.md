@@ -100,6 +100,40 @@ Error categories in the summary:
 - `decrypt` — content-type mismatches, OHTTP/BHTTP unmarshal, HPKE decapsulate failures
 - `inner HTTP` — successful OHTTP round-trip where the decrypted inner response is non-2xx
 
+## Monitor mode (`-monitor`)
+
+Long-running probe loop intended for in-cluster deployment. Refetches keys and
+runs one `relay` or `direct` round-trip per `-interval`, exposing latency
+(histogram) and outcome counters on `-metrics-addr/metrics` for Prometheus
+scraping. Stops on `SIGINT`.
+
+```sh
+./ohttp-probe -mode relay -monitor \
+  -interval 30s -metrics-addr :9090 \
+  -env stage -region us \
+  -keys https://ohttp-keys.us.id-infra.worldcoin.dev/ohttp-keys \
+  -target indexer.us.id-infra.worldcoin.dev \
+  -target-path /health \
+  https://staging.privacy-relay.cloudflare.com/us-world-id-stage
+```
+
+Exposes:
+
+- `GET /metrics` — Prometheus exposition format
+- `GET /healthz` — `200 OK` (for K8s liveness/readiness probes)
+
+Metrics:
+
+| Metric | Type | Labels | Description |
+|--------|------|--------|-------------|
+| `ohttp_probe_duration_seconds` | Histogram | `env`, `region`, `target`, `mode` | Round-trip duration including key fetch |
+| `ohttp_probe_requests_total` | Counter | `env`, `region`, `target`, `mode`, `outcome` | Probe iterations, by outcome |
+
+Outcome label values: `ok`, `transport_err`, `decrypt_err`. Inner non-2xx
+responses (e.g. backend `/health` returns 503) are bucketed as
+`transport_err` — the probe didn't return a healthy result, even though
+encryption itself worked.
+
 ## Flags
 
 | Flag | Default | Description |
@@ -115,6 +149,11 @@ Error categories in the summary:
 | `-load` | `false` | Run as load test (requires `-mode relay` or `-mode direct`) |
 | `-duration` | `30s` | Load test duration (load mode) |
 | `-qps` | | Target requests per second (load mode; required, open-model attacker) |
+| `-monitor` | `false` | Run as long-lived monitor with Prometheus metrics (requires `-mode relay` or `-mode direct`) |
+| `-interval` | `30s` | Time between probes (monitor mode) |
+| `-metrics-addr` | `:9090` | Listen address for the Prometheus metrics server (monitor mode) |
+| `-env` | | Value for the `env` label on exported metrics (monitor mode) |
+| `-region` | | Value for the `region` label on exported metrics (monitor mode) |
 
 ## Task targets
 
