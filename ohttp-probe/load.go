@@ -66,20 +66,9 @@ type ohttpRoundTripper struct {
 }
 
 func (t *ohttpRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
-	bReq := ohttp.BinaryRequest(*req)
-	bhttpBytes, err := bReq.Marshal()
-	if err != nil {
-		return nil, fmt.Errorf("%smarshal BHTTP: %w", errPrefixDecrypt, err)
-	}
-
-	plaintext, kind, err := doOHTTPRoundTrip(req.Context(), t.inner, t.postURL, t.config, bhttpBytes)
+	innerResp, kind, err := doBHTTPRoundTrip(req.Context(), t.inner, t.postURL, t.config, req)
 	if err != nil {
 		return nil, fmt.Errorf("%s%w", prefixForKind(kind), err)
-	}
-
-	innerResp, err := ohttp.UnmarshalBinaryResponse(plaintext)
-	if err != nil {
-		return nil, fmt.Errorf("%sunmarshal BHTTP: %w", errPrefixDecrypt, err)
 	}
 
 	var innerBody []byte

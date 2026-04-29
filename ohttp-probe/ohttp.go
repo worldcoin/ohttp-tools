@@ -77,3 +77,32 @@ func doOHTTPRoundTrip(
 
 	return innerPlaintext, errKindNone, nil
 }
+
+// doBHTTPRoundTrip marshals innerReq to BHTTP, performs the OHTTP round-trip
+// via doOHTTPRoundTrip, and unmarshals the inner response. BHTTP marshal and
+// unmarshal failures are classified as decrypt.
+func doBHTTPRoundTrip(
+	ctx context.Context,
+	client *http.Client,
+	postURL string,
+	config ohttp.PublicConfig,
+	innerReq *http.Request,
+) (*http.Response, ohttpErrKind, error) {
+	bReq := ohttp.BinaryRequest(*innerReq)
+	bhttpBytes, err := bReq.Marshal()
+	if err != nil {
+		return nil, errKindDecrypt, fmt.Errorf("marshal BHTTP request: %w", err)
+	}
+
+	plaintext, kind, err := doOHTTPRoundTrip(ctx, client, postURL, config, bhttpBytes)
+	if err != nil {
+		return nil, kind, err
+	}
+
+	innerResp, err := ohttp.UnmarshalBinaryResponse(plaintext)
+	if err != nil {
+		return nil, errKindDecrypt, fmt.Errorf("unmarshal BHTTP response: %w", err)
+	}
+
+	return innerResp, errKindNone, nil
+}

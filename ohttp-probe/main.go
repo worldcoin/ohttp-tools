@@ -353,26 +353,16 @@ func probeBHTTP(ctx context.Context, client *http.Client, postURL, keysURL, targ
 	if err != nil {
 		return fmt.Errorf("build inner request: %w", err)
 	}
-	bReq := ohttp.BinaryRequest(*innerReq)
-	bhttp, err := bReq.Marshal()
-	if err != nil {
-		return fmt.Errorf("marshal BHTTP request: %w", err)
-	}
 
 	if verbose {
 		fmt.Fprintf(os.Stderr, "     POST %s (Content-Type: message/ohttp-req)\n", postURL)
 	}
 
 	start := time.Now()
-	plaintext, _, err := doOHTTPRoundTrip(ctx, client, postURL, config, bhttp)
+	innerResp, _, err := doBHTTPRoundTrip(ctx, client, postURL, config, innerReq)
 	rtt := time.Since(start)
 	if err != nil {
 		return err
-	}
-
-	innerResp, err := ohttp.UnmarshalBinaryResponse(plaintext)
-	if err != nil {
-		return fmt.Errorf("unmarshal BHTTP response: %w", err)
 	}
 
 	fmt.Fprintf(os.Stderr, "[4/4] decrypted BHTTP response (HTTP %d, RTT %s)\n", innerResp.StatusCode, rtt.Round(time.Millisecond))
