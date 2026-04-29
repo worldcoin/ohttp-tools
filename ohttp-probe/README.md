@@ -17,7 +17,7 @@ go build .
 
 ## Commands
 
-The probe has three subcommands. Each has its own `-h` for command-specific
+The probe has four subcommands. Each has its own `-h` for command-specific
 flags. There is no `-mode` flag — relay vs direct-to-gateway is chosen by
 which URL you pass to `-relay-url`.
 
@@ -84,6 +84,48 @@ Error categories in the summary:
 - `decrypt` — content-type mismatches, OHTTP/BHTTP unmarshal, HPKE decapsulate failures
 - `inner HTTP` — successful OHTTP round-trip where the decrypted inner response is non-2xx
 
+### `monitor`
+
+Long-running probe loop intended for in-cluster deployment. Fetches the
+gateway's key config once at startup, then on every `-delay` runs one probe
+per `-target-url` (concurrently, one goroutine per target) and records
+latency and outcome to Prometheus metrics on a side server. Latency
+observation is the outer round-trip only — the startup key fetch is *not*
+included. If keys rotate during the probe's lifetime, probes start failing
+(`transport_err`) the same way real clients with stale keys do; restart the
+pod to refresh the config.
+
+No log-on-failure by default — alerting is consumer-side, driven off the
+counter; `-v` opts into per-iteration stderr lines for local diagnosis.
+
+```sh
+./ohttp-probe monitor \
+  -relay-url https://gateway.example.com/gateway \
+  -keys-url https://gateway.example.com/ohttp-keys \
+  -target-url https://api.example.com/health \
+  -target-url https://other-api.example.com/health \
+  -delay 30s \
+  -metrics-addr :9090
+```
+
+Metrics on `<metrics-addr>/metrics`:
+
+| Metric | Type | Labels |
+|---|---|---|
+| `ohttp_probe_duration_seconds` | Histogram | `target` |
+| `ohttp_probe_requests_total` | Counter | `target`, `outcome` |
+
+`outcome` ∈ `{ok, transport_err, decrypt_err}`. Inner non-2xx (e.g. backend
+`/health` returns 503) is bucketed as `transport_err` — the probe didn't
+return a healthy result. All three outcome series are pre-registered at 0
+so absent series don't surprise alerting on a fresh probe.
+
+`/healthz` on the same address responds 200 for liveness probes.
+
+Cluster-side labels (`env`, `region`, `cluster`) are intentionally omitted
+from the probe metrics — scrape-side relabeling (e.g. Prometheus
+`relabel_configs`) handles those.
+
 ## Shared concepts
 
 Three URL flags appear across the subcommands. The relationship between
@@ -99,7 +141,7 @@ client → POST <relay-url> → gateway → GET <target-url>
 |---|---|
 | `-relay-url` | URL the OHTTP request is POSTed to. Privacy relay, gateway `/gateway` endpoint, or any RFC 9458 server. |
 | `-keys-url` | URL of the gateway's OHTTP key config (e.g. `https://<gateway>/ohttp-keys`). |
-| `-target-url` | Full URL of the inner target the BHTTP request is forwarded to. Repeatable in `probe`; single in `load`. |
+| `-target-url` | Full URL of the inner target the BHTTP request is forwarded to. Repeatable in `probe` and `monitor`; single in `load`. |
 | `-gateway-url` | Echo-only: gateway base URL. Probe POSTs to `<gateway-url>/gateway-echo`; keys are read from `<gateway-url>/ohttp-keys`. Repeatable. |
 
 Inner request method is always `GET` — the tool tests OHTTP setup, not
@@ -114,7 +156,7 @@ arbitrary endpoint behavior.
 3. **Send** — `POST <gateway-url>/gateway-echo` with `Content-Type: message/ohttp-req`
 4. **Decrypt** — the encrypted response is decapsulated and compared to the original payload
 
-### Probe (`probe`) and load (`load`)
+### Probe (`probe`), load (`load`), monitor (`monitor`)
 
 1. **Fetch keys** — `GET <keys-url>` returns the gateway's HPKE public key config
 2. **Build inner request** — a BHTTP-encoded `GET` of `-target-url`
@@ -124,6 +166,6 @@ arbitrary endpoint behavior.
 
 ## Exit codes
 
-- `0` — all probes passed
-- `1` — one or more probes failed
+- `0` — all probes passed (or `monitor` shut down cleanly)
+- `1` — one or more probes failed (or `monitor`'s metrics server failed to start)
 - `2` — flag parse error / missing required argument

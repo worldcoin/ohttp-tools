@@ -12,10 +12,7 @@ import (
 	ohttp "github.com/chris-wood/ohttp-go"
 )
 
-// fetchKeys GETs keysURL, parses the first supported HPKE config from the
-// returned key config list, and returns it. Verbose mode prints the GET
-// stage and (always-on) byte/key-id lines for diagnostic output during
-// single-shot CLI runs.
+// fetchKeys GETs keysURL and returns the first supported HPKE config.
 func fetchKeys(ctx context.Context, client *http.Client, keysURL string, verbose bool) (ohttp.PublicConfig, error) {
 	if verbose {
 		fmt.Fprintf(os.Stderr, "[1/4] GET %s\n", keysURL)
@@ -51,9 +48,7 @@ func fetchKeys(ctx context.Context, client *http.Client, keysURL string, verbose
 }
 
 // unmarshalFirstConfig parses a length-prefixed OHTTP key config list and
-// returns the first entry the chris-wood/ohttp-go decoder accepts. RFC 9458
-// servers can advertise multiple configs (different ciphersuites); pick the
-// first one we know how to use.
+// returns the first entry the decoder accepts. RFC 9458 allows multiple.
 func unmarshalFirstConfig(data []byte) (ohttp.PublicConfig, error) {
 	for len(data) >= 2 {
 		configLen := int(binary.BigEndian.Uint16(data[:2]))
@@ -74,10 +69,8 @@ func unmarshalFirstConfig(data []byte) (ohttp.PublicConfig, error) {
 	return ohttp.PublicConfig{}, fmt.Errorf("no supported key config found")
 }
 
-// ohttpErrKind classifies failures from doOHTTPRoundTrip so callers can route
-// them. transport covers TCP/TLS/timeout/outer-non-200; decrypt covers
-// encapsulate/Content-Type/unmarshal/decapsulate. errKindNone pairs with a nil
-// error.
+// ohttpErrKind classifies doOHTTPRoundTrip failures: transport
+// (TCP/TLS/timeout/outer non-200) vs decrypt (HPKE/BHTTP/Content-Type).
 type ohttpErrKind int
 
 const (
@@ -86,11 +79,8 @@ const (
 	errKindDecrypt
 )
 
-// doOHTTPRoundTrip encapsulates plaintext under config, POSTs the ciphertext
-// to postURL with Content-Type: message/ohttp-req, validates the outer
-// response (HTTP 200 + Content-Type: message/ohttp-res), and returns the
-// decapsulated inner plaintext. BHTTP marshal/unmarshal stays in callers; the
-// helper is silent (no logging) so callers can print their own stage messages.
+// doOHTTPRoundTrip encapsulates plaintext, POSTs to postURL, validates the
+// outer response, and returns the decapsulated inner plaintext.
 func doOHTTPRoundTrip(
 	ctx context.Context,
 	client *http.Client,
@@ -142,9 +132,8 @@ func doOHTTPRoundTrip(
 	return innerPlaintext, errKindNone, nil
 }
 
-// doBHTTPRoundTrip marshals innerReq to BHTTP, performs the OHTTP round-trip
-// via doOHTTPRoundTrip, and unmarshals the inner response. BHTTP marshal and
-// unmarshal failures are classified as decrypt.
+// doBHTTPRoundTrip wraps doOHTTPRoundTrip with BHTTP marshal/unmarshal
+// of the inner request/response. BHTTP failures classify as decrypt.
 func doBHTTPRoundTrip(
 	ctx context.Context,
 	client *http.Client,

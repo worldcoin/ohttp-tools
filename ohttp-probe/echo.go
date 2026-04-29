@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"net/http"
@@ -10,9 +11,8 @@ import (
 	"time"
 )
 
-// runEcho parses the echo subcommand's flags and probes each -gateway-url
-// in sequence. Returns process exit code: 0 if all probed successfully, 1
-// if any failed, 2 on flag-parse / argument errors.
+// runEcho probes each -gateway-url in sequence. Exits 0 if all succeed,
+// 1 if any fail, 2 on flag/arg errors.
 func runEcho(ctx context.Context, args []string) int {
 	fs := flag.NewFlagSet("echo", flag.ContinueOnError)
 	fs.Usage = func() {
@@ -35,6 +35,9 @@ Flags:
 	verbose := fs.Bool("v", false, "verbose output")
 
 	if err := fs.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return 0
+		}
 		return 2
 	}
 	if len(gateways) == 0 {
@@ -62,9 +65,8 @@ Flags:
 	return exit
 }
 
-// probeEcho fetches the gateway's OHTTP key config, encapsulates payload,
-// POSTs to <gateway>/gateway-echo, and asserts the decapsulated response
-// matches.
+// probeEcho POSTs an HPKE-encrypted payload to <gateway>/gateway-echo and
+// asserts the decapsulated response matches the original.
 func probeEcho(ctx context.Context, client *http.Client, gateway string, payload []byte, verbose bool) error {
 	config, err := fetchKeys(ctx, client, joinURL(gateway, pathOHTTPKeys), verbose)
 	if err != nil {
