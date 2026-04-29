@@ -16,16 +16,14 @@ import (
 	vegeta "github.com/tsenart/vegeta/v12/lib"
 )
 
-// Error prefixes attached to ohttpRoundTripper failures. The prefixes survive
-// http.Client error wrapping so the summary bucketing can scan
-// vegeta.Result.Error and keep transport vs decrypt failures distinguishable.
+// Error prefixes survive http.Client wrapping so the summary bucketing can
+// scan vegeta.Result.Error to distinguish transport from decrypt failures.
 const (
 	errPrefixTransport = "ohttp-transport: "
 	errPrefixDecrypt   = "ohttp-decrypt: "
 )
 
-// prefixForKind maps a doOHTTPRoundTrip error kind to its vegeta-error prefix.
-// errKindNone returns "" — caller should only invoke this when err != nil.
+// prefixForKind maps an error kind to its vegeta-error prefix.
 func prefixForKind(kind ohttpErrKind) string {
 	switch kind {
 	case errKindTransport:
@@ -52,12 +50,10 @@ type loadSummary struct {
 	Latencies  vegeta.LatencyMetrics
 }
 
-// ohttpRoundTripper turns each outbound inner request into an OHTTP-wrapped
-// POST: marshal to BHTTP, HPKE-encapsulate with the pre-fetched key config,
-// POST the ciphertext to relayURL, and synthesize an *http.Response from the
-// decapsulated inner BHTTP response. Transport and decrypt failures surface
-// as errors with distinct prefixes; inner non-2xx flows through as a normal
-// response so the status code shows up in vegeta.Result.Code.
+// ohttpRoundTripper wraps each outbound request in OHTTP, POSTs to relayURL,
+// and synthesizes an *http.Response from the decapsulated inner BHTTP. Inner
+// non-2xx surfaces in vegeta.Result.Code; transport/decrypt failures get
+// prefixed in the error string.
 type ohttpRoundTripper struct {
 	inner    *http.Client
 	relayURL string
@@ -92,9 +88,8 @@ func (t *ohttpRoundTripper) RoundTrip(req *http.Request) (*http.Response, error)
 	return synth, nil
 }
 
-// runLoad parses the load subcommand's flags and drives the OHTTP probe path
-// at constant QPS for a fixed duration. Returns process exit code: 0 on
-// success (no failures), 1 if any requests failed, 2 on flag errors.
+// runLoad drives the OHTTP path at constant QPS for a fixed duration.
+// Exits 0 on no failures, 1 if any failed, 2 on flag/arg errors.
 func runLoad(ctx context.Context, args []string) int {
 	fs := flag.NewFlagSet("load", flag.ContinueOnError)
 	fs.Usage = func() {
@@ -153,8 +148,8 @@ Flags:
 	return 0
 }
 
-// executeLoad does the actual vegeta run. Split from runLoad so tests can
-// drive the load logic directly without going through flag parsing.
+// executeLoad runs the vegeta attack. Split from runLoad so tests can drive
+// it directly without flag parsing.
 func executeLoad(ctx context.Context, client *http.Client, relayURL, keysURL, targetURL string, qps int, duration time.Duration, verbose bool) error {
 	fmt.Fprintf(os.Stderr, "load: fetching keys from %s\n", keysURL)
 	config, err := fetchKeys(ctx, client, keysURL, verbose)
@@ -235,8 +230,8 @@ func (c *bucketCounts) classify(res *vegeta.Result) {
 	case strings.Contains(res.Error, errPrefixDecrypt):
 		c.decrypt++
 	case res.Error != "":
-		// Shouldn't happen — ohttpRoundTripper always prefixes its errors.
-		// Bucket as transport so unexpected failures aren't silently dropped.
+		// Catch-all: ohttpRoundTripper should always prefix; bucket
+		// unexpected unprefixed errors as transport.
 		c.transport++
 	case res.Code < 200 || res.Code >= 300:
 		c.inner++

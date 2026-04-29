@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	ohttp "github.com/chris-wood/ohttp-go"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
@@ -21,9 +22,6 @@ const (
 	outcomeDecryptErr   = "decrypt_err"
 )
 
-// monitorMetrics owns the Prometheus collectors. The collectors are vectors
-// keyed by target so a single registry serves all goroutines spawned by
-// runMonitor.
 type monitorMetrics struct {
 	registry *prometheus.Registry
 	duration *prometheus.HistogramVec
@@ -34,7 +32,7 @@ func newMonitorMetrics() *monitorMetrics {
 	reg := prometheus.NewRegistry()
 	duration := prometheus.NewHistogramVec(prometheus.HistogramOpts{
 		Name:    "ohttp_probe_duration_seconds",
-		Help:    "OHTTP probe round-trip duration in seconds, including key fetch.",
+		Help:    "OHTTP probe outer round-trip duration in seconds (excludes key fetch).",
 		Buckets: prometheus.DefBuckets,
 	}, []string{"target"})
 	requests := prometheus.NewCounterVec(prometheus.CounterOpts{
@@ -45,37 +43,33 @@ func newMonitorMetrics() *monitorMetrics {
 	return &monitorMetrics{registry: reg, duration: duration, requests: requests}
 }
 
-// record observes one probe iteration. Pre-registering the zero-valued
-// counters for every (target, outcome) ensures consumers see all three
-// outcome series even before the first failure occurs.
+// record observes one round-trip: counter Inc + histogram Observe.
 func (m *monitorMetrics) record(target string, elapsed time.Duration, outcome string) {
 	m.duration.WithLabelValues(target).Observe(elapsed.Seconds())
 	m.requests.WithLabelValues(target, outcome).Inc()
 }
 
-// preRegisterTarget materialises the zero-valued counter rows for a target
-// so that absent series don't surprise alerting. Without this, an alert
-// querying ohttp_probe_requests_total{outcome="transport_err"} on a fresh
-// probe sees no series at all rather than a value of 0.
+// preRegisterTarget materialises all three outcome counters at 0 so absent
+// series don't surprise alerting on a fresh probe.
 func (m *monitorMetrics) preRegisterTarget(target string) {
 	for _, outcome := range []string{outcomeOK, outcomeTransportErr, outcomeDecryptErr} {
 		m.requests.WithLabelValues(target, outcome).Add(0)
 	}
 }
 
-// runMonitor parses the monitor subcommand's flags and drives one probe
-// loop per -target-url. All loops share a single metrics registry served
-// on -metrics-addr. Returns process exit code: 0 on graceful shutdown
-// (Ctrl-C), 1 if the metrics server fails, 2 on flag/arg errors.
+// runMonitor fetches the key config once at startup and runs one probe
+// loop per target. Exit codes: 0 on Ctrl-C, 1 on startup/server failure,
+// 2 on flag/arg errors. If keys rotate later, probes fail until restart.
 func runMonitor(ctx context.Context, args []string) int {
 	fs := flag.NewFlagSet("monitor", flag.ContinueOnError)
 	fs.Usage = func() {
 		fmt.Fprint(os.Stderr, `Usage: ohttp-probe monitor [flags]
 
-Long-running OHTTP probe. Every -delay, runs one BHTTP round-trip per
--target-url through -relay-url and records latency and outcome to
-Prometheus metrics on -metrics-addr/metrics. Intended for in-cluster
-deployment with a Prometheus-compatible scraper picking up the side server.
+Long-running OHTTP probe. Fetches the gateway's key config once at startup,
+then on every -delay runs one BHTTP round-trip per -target-url through
+-relay-url and records latency and outcome to Prometheus metrics on
+-metrics-addr/metrics. Intended for in-cluster deployment with a
+Prometheus-compatible scraper picking up the side server.
 
 Flags:
 `)
@@ -113,6 +107,13 @@ Flags:
 		}
 	}
 
+	keysClient := &http.Client{Timeout: *timeout}
+	config, err := fetchKeys(ctx, keysClient, *keysURL, *verbose)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "monitor: startup key fetch failed: %v\n", err)
+		return 1
+	}
+
 	metrics := newMonitorMetrics()
 	for _, target := range targets {
 		metrics.preRegisterTarget(target)
@@ -130,7 +131,7 @@ Flags:
 		wg.Add(1)
 		go func(target string) {
 			defer wg.Done()
-			runProbeLoop(loopCtx, *timeout, *relayURL, *keysURL, target, *delay, metrics, *verbose)
+			runProbeLoop(loopCtx, *timeout, *relayURL, config, target, *delay, metrics, *verbose)
 		}(target)
 	}
 
@@ -151,21 +152,20 @@ Flags:
 }
 
 // runProbeLoop fires probes against target on each tick of delay. Owns the
-// http.Client so its connection pool stays scoped to this goroutine. Errors
-// are surfaced only via the metrics counter (per the task design — alerting
-// is consumer-side, not log-based). Verbose mode opts into per-iteration
-// stderr lines for local diagnosis.
+// http.Client so the connection pool is scoped to this goroutine.
 func runProbeLoop(
 	ctx context.Context,
 	timeout time.Duration,
-	relayURL, keysURL, target string,
+	relayURL string,
+	config ohttp.PublicConfig,
+	target string,
 	delay time.Duration,
 	metrics *monitorMetrics,
 	verbose bool,
 ) {
 	client := &http.Client{Timeout: timeout}
 
-	probeOnce(ctx, client, relayURL, keysURL, target, metrics, verbose)
+	probeOnce(ctx, client, relayURL, config, target, metrics, verbose)
 
 	ticker := time.NewTicker(delay)
 	defer ticker.Stop()
@@ -175,20 +175,19 @@ func runProbeLoop(
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			probeOnce(ctx, client, relayURL, keysURL, target, metrics, verbose)
+			probeOnce(ctx, client, relayURL, config, target, metrics, verbose)
 		}
 	}
 }
 
-// probeOnce performs one full key-fetch + BHTTP round-trip against target
-// and records the result. The latency observation includes the key fetch
-// (per the design — keys can rotate between ticks, so each iteration is
-// self-contained). Inner non-2xx is bucketed as transport_err to keep the
-// outcome set to {ok, transport_err, decrypt_err}.
+// probeOnce times one round-trip and records counter + histogram. Inner
+// non-2xx maps to transport_err.
 func probeOnce(
 	ctx context.Context,
 	client *http.Client,
-	relayURL, keysURL, target string,
+	relayURL string,
+	config ohttp.PublicConfig,
+	target string,
 	metrics *monitorMetrics,
 	verbose bool,
 ) {
@@ -197,7 +196,7 @@ func probeOnce(
 	}
 
 	start := time.Now()
-	outcome, code, err := probeIteration(ctx, client, relayURL, keysURL, target)
+	outcome, code, err := probeIteration(ctx, client, relayURL, config, target)
 	elapsed := time.Since(start)
 	metrics.record(target, elapsed, outcome)
 
@@ -214,16 +213,9 @@ func probeOnce(
 	}
 }
 
-// probeIteration fetches keys, performs one BHTTP round-trip, and maps the
-// result to a metric outcome. Returns the outcome label, inner status code
-// (0 on pre-response failures), and the underlying error for verbose
-// logging.
-func probeIteration(ctx context.Context, client *http.Client, relayURL, keysURL, target string) (string, int, error) {
-	config, err := fetchKeys(ctx, client, keysURL, false)
-	if err != nil {
-		return outcomeTransportErr, 0, err
-	}
-
+// probeIteration runs one BHTTP round-trip and maps the result to an
+// outcome label. Caller owns timing; no I/O outside the round-trip.
+func probeIteration(ctx context.Context, client *http.Client, relayURL string, config ohttp.PublicConfig, target string) (string, int, error) {
 	innerReq, err := http.NewRequestWithContext(ctx, http.MethodGet, target, nil)
 	if err != nil {
 		return outcomeTransportErr, 0, fmt.Errorf("build inner request: %w", err)
@@ -244,9 +236,8 @@ func probeIteration(ctx context.Context, client *http.Client, relayURL, keysURL,
 	return outcomeOK, innerResp.StatusCode, nil
 }
 
-// startMetricsServer binds /metrics and /healthz on addr. Returns the server
-// and a buffered channel that fires once if ListenAndServe returns an error
-// other than ErrServerClosed.
+// startMetricsServer binds /metrics and /healthz on addr. The error channel
+// fires once if ListenAndServe returns a non-ErrServerClosed error.
 func startMetricsServer(addr string, reg *prometheus.Registry) (*http.Server, <-chan error) {
 	mux := http.NewServeMux()
 	mux.Handle("/metrics", promhttp.HandlerFor(reg, promhttp.HandlerOpts{Registry: reg}))

@@ -63,17 +63,13 @@ Run "ohttp-probe <command> -h" for command-specific flags.
 `)
 }
 
-// rootContext returns a context that's cancelled by SIGINT. The cancel is
-// owned by the process; subcommands rely on the context to interrupt
-// in-flight requests on Ctrl-C.
+// rootContext returns a context cancelled by SIGINT.
 func rootContext() context.Context {
 	ctx, _ := signal.NotifyContext(context.Background(), os.Interrupt)
 	return ctx
 }
 
-// urlList is a repeatable string flag that accumulates one URL per
-// occurrence. Used by probe (-target-url), echo (-gateway-url) — anywhere
-// the design takes a list of URLs.
+// urlList is a repeatable string flag, accumulating one URL per occurrence.
 type urlList []string
 
 func (u *urlList) String() string { return strings.Join(*u, ",") }
@@ -112,8 +108,7 @@ func validateURL(raw string) error {
 	return nil
 }
 
-// joinURL appends path to base, taking care of slashes. Used by echo to
-// build /gateway-echo and /ohttp-keys URLs from a gateway base.
+// joinURL appends path to base, normalising slashes.
 func joinURL(base, path string) string {
 	u, _ := url.Parse(base)
 	u = u.JoinPath(path)
@@ -121,6 +116,4 @@ func joinURL(base, path string) string {
 	return u.String()
 }
 
-// trimRightSlash strips trailing "/" from base URLs so subsequent path joins
-// produce canonical output.
 func trimRightSlash(s string) string { return strings.TrimRight(s, "/") }

@@ -13,9 +13,8 @@ import (
 	ohttp "github.com/chris-wood/ohttp-go"
 )
 
-// runProbe parses the probe subcommand's flags and runs one OHTTP round-trip
-// per -target-url concurrently through a single -relay-url. Returns process
-// exit code: 0 if all targets succeeded, 1 if any failed, 2 on flag errors.
+// runProbe runs one OHTTP round-trip per -target-url concurrently through a
+// single -relay-url. Exits 0 on all-pass, 1 on any failure, 2 on flag errors.
 func runProbe(ctx context.Context, args []string) int {
 	fs := flag.NewFlagSet("probe", flag.ContinueOnError)
 	fs.Usage = func() {
@@ -62,9 +61,7 @@ Flags:
 
 	client := &http.Client{Timeout: *timeout}
 
-	// Fetch keys once up-front; share across all targets. probe is a
-	// one-shot, so any churn from key rotation between iterations isn't
-	// a concern (unlike monitor).
+	// Fetch keys once up-front; share across all targets.
 	config, err := fetchKeys(ctx, client, *keysURL, *verbose)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "FAIL: %v\n", err)
@@ -104,10 +101,8 @@ Flags:
 	return exit
 }
 
-// probeBHTTP builds a BHTTP-encoded GET for targetURL, encapsulates it with
-// config, POSTs it to relayURL, and decodes the inner response. Returns the
-// inner HTTP status code on success; on failure returns the error and a
-// best-effort status code (0 if no response was decoded).
+// probeBHTTP wraps a BHTTP-encoded GET in OHTTP, POSTs it to relayURL, and
+// decodes the inner response. Returns inner status (0 if no response decoded).
 func probeBHTTP(ctx context.Context, client *http.Client, relayURL string, config ohttp.PublicConfig, targetURL string, verbose bool) (int, error) {
 	innerReq, err := http.NewRequest(http.MethodGet, targetURL, nil)
 	if err != nil {

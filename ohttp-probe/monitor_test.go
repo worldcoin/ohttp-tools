@@ -22,9 +22,10 @@ func TestProbeIterationOK(t *testing.T) {
 		_, _ = w.Write([]byte("ok"))
 	})
 	relaySrv, keysSrv := newRelayServer(t, gw, backend)
+	cfg := fetchTestKeys(t, keysSrv.URL)
 
 	outcome, code, err := probeIteration(context.Background(), relaySrv.Client(),
-		relaySrv.URL, keysSrv.URL, "https://backend.test/health")
+		relaySrv.URL, cfg, "https://backend.test/health")
 	if err != nil {
 		t.Fatalf("expected no error, got: %v", err)
 	}
@@ -42,9 +43,10 @@ func TestProbeIterationInnerNon2xxIsTransportErr(t *testing.T) {
 		http.Error(w, "down", http.StatusServiceUnavailable)
 	})
 	relaySrv, keysSrv := newRelayServer(t, gw, backend)
+	cfg := fetchTestKeys(t, keysSrv.URL)
 
 	outcome, code, err := probeIteration(context.Background(), relaySrv.Client(),
-		relaySrv.URL, keysSrv.URL, "https://backend.test/health")
+		relaySrv.URL, cfg, "https://backend.test/health")
 	if err == nil {
 		t.Fatal("expected error for inner 503")
 	}
@@ -58,9 +60,10 @@ func TestProbeIterationInnerNon2xxIsTransportErr(t *testing.T) {
 
 func TestProbeIterationRelay5xxIsTransportErr(t *testing.T) {
 	keysSrv, relaySrv := relayKeysWithStatus(t, http.StatusBadGateway)
+	cfg := fetchTestKeys(t, keysSrv.URL)
 
 	outcome, _, err := probeIteration(context.Background(), relaySrv.Client(),
-		relaySrv.URL, keysSrv.URL, "https://backend.test/health")
+		relaySrv.URL, cfg, "https://backend.test/health")
 	if err == nil {
 		t.Fatal("expected error for relay 502")
 	}
@@ -84,34 +87,15 @@ func TestProbeIterationDecryptErrOnBadContentType(t *testing.T) {
 		_, _ = w.Write([]byte("not-ohttp"))
 	}))
 	t.Cleanup(relaySrv.Close)
+	cfg := fetchTestKeys(t, keysSrv.URL)
 
 	outcome, _, err := probeIteration(context.Background(), relaySrv.Client(),
-		relaySrv.URL, keysSrv.URL, "https://backend.test/health")
+		relaySrv.URL, cfg, "https://backend.test/health")
 	if err == nil {
 		t.Fatal("expected decrypt error")
 	}
 	if outcome != outcomeDecryptErr {
 		t.Fatalf("expected outcome=decrypt_err, got %q", outcome)
-	}
-}
-
-func TestProbeIterationKeyFetchFailsAsTransportErr(t *testing.T) {
-	keysSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		http.Error(w, "no keys", http.StatusNotFound)
-	}))
-	t.Cleanup(keysSrv.Close)
-	relaySrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		t.Fatal("relay must not be reached when keys fail")
-	}))
-	t.Cleanup(relaySrv.Close)
-
-	outcome, _, err := probeIteration(context.Background(), relaySrv.Client(),
-		relaySrv.URL, keysSrv.URL, "https://backend.test/health")
-	if err == nil {
-		t.Fatal("expected error for failed key fetch")
-	}
-	if outcome != outcomeTransportErr {
-		t.Fatalf("expected outcome=transport_err for key fetch failure, got %q", outcome)
 	}
 }
 
@@ -293,6 +277,26 @@ func TestRunMonitorMultiTarget(t *testing.T) {
 	case <-done:
 	case <-time.After(2 * time.Second):
 		t.Fatal("runMonitor did not return after context cancel")
+	}
+}
+
+func TestRunMonitorStartupKeyFetchFailureExits1(t *testing.T) {
+	keysSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "no keys", http.StatusNotFound)
+	}))
+	t.Cleanup(keysSrv.Close)
+
+	args := []string{
+		"-relay-url", "https://relay.test/gateway",
+		"-keys-url", keysSrv.URL,
+		"-target-url", "https://backend.test/health",
+		"-delay", "20ms",
+		"-metrics-addr", "127.0.0.1:0",
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if got := runMonitor(ctx, args); got != 1 {
+		t.Errorf("runMonitor exit code on startup key-fetch failure: want 1, got %d", got)
 	}
 }
 

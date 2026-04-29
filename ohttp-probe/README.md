@@ -86,10 +86,16 @@ Error categories in the summary:
 
 ### `monitor`
 
-Long-running probe loop intended for in-cluster deployment. Every `-delay`,
-runs one probe per `-target-url` (concurrently, one goroutine per target)
-and records latency and outcome to Prometheus metrics on a side server. No
-log-on-failure by default — alerting is consumer-side, driven off the
+Long-running probe loop intended for in-cluster deployment. Fetches the
+gateway's key config once at startup, then on every `-delay` runs one probe
+per `-target-url` (concurrently, one goroutine per target) and records
+latency and outcome to Prometheus metrics on a side server. Latency
+observation is the outer round-trip only — the startup key fetch is *not*
+included. If keys rotate during the probe's lifetime, probes start failing
+(`transport_err`) the same way real clients with stale keys do; restart the
+pod to refresh the config.
+
+No log-on-failure by default — alerting is consumer-side, driven off the
 counter; `-v` opts into per-iteration stderr lines for local diagnosis.
 
 ```sh
