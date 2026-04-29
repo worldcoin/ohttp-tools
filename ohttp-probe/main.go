@@ -7,7 +7,6 @@ import (
 	"flag"
 	"fmt"
 	"io"
-	"mime"
 	"net/http"
 	"net/url"
 	"os"
@@ -307,54 +306,16 @@ func probeEcho(ctx context.Context, client *http.Client, base string, payload []
 		return err
 	}
 
-	ohttpClient := ohttp.NewDefaultClient(config)
-	encReq, encCtx, err := ohttpClient.EncapsulateRequest(payload)
-	if err != nil {
-		return fmt.Errorf("encapsulate: %w", err)
-	}
-	ciphertext := encReq.Marshal()
-	fmt.Fprintf(os.Stderr, "[3/4] encrypted %d bytes -> %d bytes ciphertext\n", len(payload), len(ciphertext))
-
 	echoURL := joinURL(base, pathEcho)
 	if verbose {
 		fmt.Fprintf(os.Stderr, "     POST %s (Content-Type: message/ohttp-req)\n", echoURL)
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, echoURL, bytes.NewReader(ciphertext))
-	if err != nil {
-		return fmt.Errorf("build echo request: %w", err)
-	}
-	req.Header.Set("Content-Type", "message/ohttp-req")
-
 	start := time.Now()
-	resp, err := client.Do(req)
+	plaintext, _, err := doOHTTPRoundTrip(ctx, client, echoURL, config, payload)
 	rtt := time.Since(start)
 	if err != nil {
-		return fmt.Errorf("echo request: %w", err)
-	}
-	defer func() { _ = resp.Body.Close() }()
-
-	body, err := readBody(resp)
-	if err != nil {
-		return fmt.Errorf("read echo response: %w", err)
-	}
-
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("POST %s returned HTTP %d: %s", echoURL, resp.StatusCode, string(body))
-	}
-
-	mediaType, _, _ := mime.ParseMediaType(resp.Header.Get("Content-Type"))
-	if mediaType != "message/ohttp-res" {
-		return fmt.Errorf("unexpected Content-Type: %s", resp.Header.Get("Content-Type"))
-	}
-
-	encapResp, err := ohttp.UnmarshalEncapsulatedResponse(body)
-	if err != nil {
-		return fmt.Errorf("unmarshal encapsulated response: %w", err)
-	}
-	plaintext, err := encCtx.DecapsulateResponse(encapResp)
-	if err != nil {
-		return fmt.Errorf("decapsulate response: %w", err)
+		return err
 	}
 
 	fmt.Fprintf(os.Stderr, "[4/4] decrypted response (%d bytes, RTT %s)\n", len(plaintext), rtt.Round(time.Millisecond))
@@ -369,7 +330,6 @@ func probeEcho(ctx context.Context, client *http.Client, base string, payload []
 	if verbose {
 		fmt.Fprintf(os.Stderr, "  sent:     %q\n", string(payload))
 		fmt.Fprintf(os.Stderr, "  received: %q\n", string(plaintext))
-		fmt.Fprintf(os.Stderr, "  headers:  %s\n", formatHeaders(resp.Header))
 	}
 
 	return nil
@@ -393,64 +353,16 @@ func probeBHTTP(ctx context.Context, client *http.Client, postURL, keysURL, targ
 	if err != nil {
 		return fmt.Errorf("build inner request: %w", err)
 	}
-	bReq := ohttp.BinaryRequest(*innerReq)
-	bhttp, err := bReq.Marshal()
-	if err != nil {
-		return fmt.Errorf("marshal BHTTP request: %w", err)
-	}
-
-	ohttpClient := ohttp.NewDefaultClient(config)
-	encReq, encCtx, err := ohttpClient.EncapsulateRequest(bhttp)
-	if err != nil {
-		return fmt.Errorf("encapsulate: %w", err)
-	}
-	ciphertext := encReq.Marshal()
-	fmt.Fprintf(os.Stderr, "[3/4] encrypted BHTTP GET %s -> %d bytes ciphertext\n", targetURL, len(ciphertext))
 
 	if verbose {
 		fmt.Fprintf(os.Stderr, "     POST %s (Content-Type: message/ohttp-req)\n", postURL)
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, postURL, bytes.NewReader(ciphertext))
-	if err != nil {
-		return fmt.Errorf("build %s request: %w", mode, err)
-	}
-	req.Header.Set("Content-Type", "message/ohttp-req")
-
 	start := time.Now()
-	resp, err := client.Do(req)
+	innerResp, _, err := doBHTTPRoundTrip(ctx, client, postURL, config, innerReq)
 	rtt := time.Since(start)
 	if err != nil {
-		return fmt.Errorf("%s request: %w", mode, err)
-	}
-	defer func() { _ = resp.Body.Close() }()
-
-	body, err := readBody(resp)
-	if err != nil {
-		return fmt.Errorf("read %s response: %w", mode, err)
-	}
-
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("POST %s returned HTTP %d: %s", postURL, resp.StatusCode, string(body))
-	}
-
-	mediaType, _, _ := mime.ParseMediaType(resp.Header.Get("Content-Type"))
-	if mediaType != "message/ohttp-res" {
-		return fmt.Errorf("unexpected Content-Type: %s", resp.Header.Get("Content-Type"))
-	}
-
-	encapResp, err := ohttp.UnmarshalEncapsulatedResponse(body)
-	if err != nil {
-		return fmt.Errorf("unmarshal encapsulated response: %w", err)
-	}
-	plaintext, err := encCtx.DecapsulateResponse(encapResp)
-	if err != nil {
-		return fmt.Errorf("decapsulate response: %w", err)
-	}
-
-	innerResp, err := ohttp.UnmarshalBinaryResponse(plaintext)
-	if err != nil {
-		return fmt.Errorf("unmarshal BHTTP response: %w", err)
+		return err
 	}
 
 	fmt.Fprintf(os.Stderr, "[4/4] decrypted BHTTP response (HTTP %d, RTT %s)\n", innerResp.StatusCode, rtt.Round(time.Millisecond))
@@ -469,23 +381,11 @@ func probeBHTTP(ctx context.Context, client *http.Client, postURL, keysURL, targ
 
 	fmt.Fprintf(os.Stderr, "OK: %s -> gateway -> %s%s returned HTTP %d\n", mode, targetHost, targetPath, innerResp.StatusCode)
 
-	if verbose {
-		if len(innerBody) > 0 {
-			fmt.Fprintf(os.Stderr, "  body: %s\n", string(innerBody))
-		}
-		fmt.Fprintf(os.Stderr, "  %s headers: %s\n", mode, formatHeaders(resp.Header))
+	if verbose && len(innerBody) > 0 {
+		fmt.Fprintf(os.Stderr, "  body: %s\n", string(innerBody))
 	}
 
 	return nil
-}
-
-func formatHeaders(h http.Header) string {
-	var parts []string
-	for k, v := range h {
-		parts = append(parts, fmt.Sprintf("%s=%s", k, strings.Join(v, ",")))
-	}
-
-	return strings.Join(parts, "; ")
 }
 
 func unmarshalFirstConfig(data []byte) (ohttp.PublicConfig, error) {
