@@ -50,144 +50,119 @@ tasks:
     generates:
       - "{{.BIN}}"
 
-  # Backend-endpoint probes via Cloudflare Privacy Gateway relay. Enumerate every
-  # backend host per env (world-id-indexer in all regions, world-id-gateway
-  # US-only) and probe `/health`. Exercise the full client → relay → gateway →
-  # backend path.
+  # Backend-endpoint probes via Cloudflare Privacy Gateway relay. Hit every
+  # backend host (world-id-indexer in all regions, world-id-gateway US-only)
+  # at /health, exercising the full client → relay → gateway → backend path.
   test-backends:
     desc: Probe every staging backend (/health) via Cloudflare Privacy Gateway relay
     deps: [build]
     cmds:
       - |
-        ./{{.BIN}} -mode relay -v \
-          -keys {{.STAGE_KEYS_US}} \
-          -target gateway.us.id-infra.worldcoin.dev \
-          -target-path /health \
-          {{.RELAY_STAGE_US}}
+        ./{{.BIN}} probe -v \
+          -relay-url {{.RELAY_STAGE_US}} \
+          -keys-url {{.STAGE_KEYS_US}} \
+          -target-url https://gateway.us.id-infra.worldcoin.dev/health \
+          -target-url https://indexer.us.id-infra.worldcoin.dev/health
       - |
-        ./{{.BIN}} -mode relay -v \
-          -keys {{.STAGE_KEYS_US}} \
-          -target indexer.us.id-infra.worldcoin.dev \
-          -target-path /health \
-          {{.RELAY_STAGE_US}}
+        ./{{.BIN}} probe -v \
+          -relay-url {{.RELAY_STAGE_EU}} \
+          -keys-url {{.STAGE_KEYS_EU}} \
+          -target-url https://indexer.eu.id-infra.worldcoin.dev/health
       - |
-        ./{{.BIN}} -mode relay -v \
-          -keys {{.STAGE_KEYS_EU}} \
-          -target indexer.eu.id-infra.worldcoin.dev \
-          -target-path /health \
-          {{.RELAY_STAGE_EU}}
-      - |
-        ./{{.BIN}} -mode relay -v \
-          -keys {{.STAGE_KEYS_AP}} \
-          -target indexer.ap.id-infra.worldcoin.dev \
-          -target-path /health \
-          {{.RELAY_STAGE_AP}}
+        ./{{.BIN}} probe -v \
+          -relay-url {{.RELAY_STAGE_AP}} \
+          -keys-url {{.STAGE_KEYS_AP}} \
+          -target-url https://indexer.ap.id-infra.worldcoin.dev/health
 
   test-backends-prod:
     desc: Probe every production backend (/health) via Cloudflare Privacy Gateway relay
     deps: [build]
     cmds:
       - |
-        ./{{.BIN}} -mode relay -v \
-          -keys {{.PROD_KEYS_US}} \
-          -target gateway.us.id-infra.world.org \
-          -target-path /health \
-          {{.RELAY_PROD_US}}
+        ./{{.BIN}} probe -v \
+          -relay-url {{.RELAY_PROD_US}} \
+          -keys-url {{.PROD_KEYS_US}} \
+          -target-url https://gateway.us.id-infra.world.org/health \
+          -target-url https://indexer.us.id-infra.world.org/health
       - |
-        ./{{.BIN}} -mode relay -v \
-          -keys {{.PROD_KEYS_US}} \
-          -target indexer.us.id-infra.world.org \
-          -target-path /health \
-          {{.RELAY_PROD_US}}
+        ./{{.BIN}} probe -v \
+          -relay-url {{.RELAY_PROD_EU}} \
+          -keys-url {{.PROD_KEYS_EU}} \
+          -target-url https://indexer.eu.id-infra.world.org/health
       - |
-        ./{{.BIN}} -mode relay -v \
-          -keys {{.PROD_KEYS_EU}} \
-          -target indexer.eu.id-infra.world.org \
-          -target-path /health \
-          {{.RELAY_PROD_EU}}
-      - |
-        ./{{.BIN}} -mode relay -v \
-          -keys {{.PROD_KEYS_AP}} \
-          -target indexer.ap.id-infra.world.org \
-          -target-path /health \
-          {{.RELAY_PROD_AP}}
+        ./{{.BIN}} probe -v \
+          -relay-url {{.RELAY_PROD_AP}} \
+          -keys-url {{.PROD_KEYS_AP}} \
+          -target-url https://indexer.ap.id-infra.world.org/health
 
   # Backend-endpoint probes posted directly to the gateway ALB's /gateway
-  # endpoint, bypassing the Cloudflare relay. Same BHTTP inner request as
-  # test-backends{,-prod} but without the relay leg. Requires ALB mTLS
+  # endpoint (no relay leg). Same BHTTP inner request as test-backends; the
+  # only difference is -relay-url points at the gateway. Requires ALB mTLS
   # temporarily disabled (`open_to_all = true; mtls_enabled = false`).
   test-backends-direct:
     desc: Probe every staging backend (/health) directly on the gateway ALB (requires ALB mTLS disabled)
     deps: [build]
     cmds:
       - |
-        ./{{.BIN}} -mode direct -v \
-          -keys {{.STAGE_KEYS_US}} \
-          -target gateway.us.id-infra.worldcoin.dev \
-          -target-path /health \
-          {{.STAGE_US}}
+        ./{{.BIN}} probe -v \
+          -relay-url {{.STAGE_US}}/gateway \
+          -keys-url {{.STAGE_KEYS_US}} \
+          -target-url https://gateway.us.id-infra.worldcoin.dev/health \
+          -target-url https://indexer.us.id-infra.worldcoin.dev/health
       - |
-        ./{{.BIN}} -mode direct -v \
-          -keys {{.STAGE_KEYS_US}} \
-          -target indexer.us.id-infra.worldcoin.dev \
-          -target-path /health \
-          {{.STAGE_US}}
+        ./{{.BIN}} probe -v \
+          -relay-url {{.STAGE_EU}}/gateway \
+          -keys-url {{.STAGE_KEYS_EU}} \
+          -target-url https://indexer.eu.id-infra.worldcoin.dev/health
       - |
-        ./{{.BIN}} -mode direct -v \
-          -keys {{.STAGE_KEYS_EU}} \
-          -target indexer.eu.id-infra.worldcoin.dev \
-          -target-path /health \
-          {{.STAGE_EU}}
-      - |
-        ./{{.BIN}} -mode direct -v \
-          -keys {{.STAGE_KEYS_AP}} \
-          -target indexer.ap.id-infra.worldcoin.dev \
-          -target-path /health \
-          {{.STAGE_AP}}
+        ./{{.BIN}} probe -v \
+          -relay-url {{.STAGE_AP}}/gateway \
+          -keys-url {{.STAGE_KEYS_AP}} \
+          -target-url https://indexer.ap.id-infra.worldcoin.dev/health
 
   test-backends-direct-prod:
     desc: Probe every production backend (/health) directly on the gateway ALB (requires ALB mTLS disabled)
     deps: [build]
     cmds:
       - |
-        ./{{.BIN}} -mode direct -v \
-          -keys {{.PROD_KEYS_US}} \
-          -target gateway.us.id-infra.world.org \
-          -target-path /health \
-          {{.PROD_US}}
+        ./{{.BIN}} probe -v \
+          -relay-url {{.PROD_US}}/gateway \
+          -keys-url {{.PROD_KEYS_US}} \
+          -target-url https://gateway.us.id-infra.world.org/health \
+          -target-url https://indexer.us.id-infra.world.org/health
       - |
-        ./{{.BIN}} -mode direct -v \
-          -keys {{.PROD_KEYS_US}} \
-          -target indexer.us.id-infra.world.org \
-          -target-path /health \
-          {{.PROD_US}}
+        ./{{.BIN}} probe -v \
+          -relay-url {{.PROD_EU}}/gateway \
+          -keys-url {{.PROD_KEYS_EU}} \
+          -target-url https://indexer.eu.id-infra.world.org/health
       - |
-        ./{{.BIN}} -mode direct -v \
-          -keys {{.PROD_KEYS_EU}} \
-          -target indexer.eu.id-infra.world.org \
-          -target-path /health \
-          {{.PROD_EU}}
-      - |
-        ./{{.BIN}} -mode direct -v \
-          -keys {{.PROD_KEYS_AP}} \
-          -target indexer.ap.id-infra.world.org \
-          -target-path /health \
-          {{.PROD_AP}}
+        ./{{.BIN}} probe -v \
+          -relay-url {{.PROD_AP}}/gateway \
+          -keys-url {{.PROD_KEYS_AP}} \
+          -target-url https://indexer.ap.id-infra.world.org/health
 
   # Echo probes POST an HPKE-encrypted payload directly to the gateway ALB's
-  # /gateway-echo endpoint. Pure OHTTP crypto round-trip — no backend involved,
-  # no relay. Requires ALB mTLS temporarily disabled.
+  # /gateway-echo endpoint. Pure OHTTP crypto round-trip — no backend
+  # involved, no relay. Requires ALB mTLS temporarily disabled.
   test-echo:
     desc: Probe every staging gateway /gateway-echo directly (requires ALB mTLS disabled)
     deps: [build]
     cmds:
-      - ./{{.BIN}} -mode echo -v {{.STAGE_US}} {{.STAGE_EU}} {{.STAGE_AP}}
+      - |
+        ./{{.BIN}} echo -v \
+          -gateway-url {{.STAGE_US}} \
+          -gateway-url {{.STAGE_EU}} \
+          -gateway-url {{.STAGE_AP}}
 
   test-echo-prod:
     desc: Probe every production gateway /gateway-echo directly (requires ALB mTLS disabled)
     deps: [build]
     cmds:
-      - ./{{.BIN}} -mode echo -v {{.PROD_US}} {{.PROD_EU}} {{.PROD_AP}}
+      - |
+        ./{{.BIN}} echo -v \
+          -gateway-url {{.PROD_US}} \
+          -gateway-url {{.PROD_EU}} \
+          -gateway-url {{.PROD_AP}}
 
   # Load tests drive the Cloudflare Privacy Gateway relay path at a constant
   # request rate for -duration against a single region's indexer /health.
@@ -203,12 +178,11 @@ tasks:
       TARGET_HOST: '{{.TARGET_HOST | default (printf "indexer.%s.id-infra.worldcoin.dev" .REGION)}}'
     cmds:
       - |
-        ./{{.BIN}} -mode relay -load \
+        ./{{.BIN}} load \
           -duration {{.DURATION}} -qps {{.QPS}} \
-          -keys https://ohttp-keys.{{.REGION}}.id-infra.worldcoin.dev/ohttp-keys \
-          -target {{.TARGET_HOST}} \
-          -target-path /health \
-          https://staging.privacy-relay.cloudflare.com/{{.REGION}}-world-id-stage
+          -relay-url https://staging.privacy-relay.cloudflare.com/{{.REGION}}-world-id-stage \
+          -keys-url https://ohttp-keys.{{.REGION}}.id-infra.worldcoin.dev/ohttp-keys \
+          -target-url https://{{.TARGET_HOST}}/health
 
   load-prod:
     desc: Load-test a production region via Cloudflare Privacy Gateway relay (coordinate with infra on CF quota)
@@ -220,9 +194,8 @@ tasks:
       TARGET_HOST: '{{.TARGET_HOST | default (printf "indexer.%s.id-infra.world.org" .REGION)}}'
     cmds:
       - |
-        ./{{.BIN}} -mode relay -load \
+        ./{{.BIN}} load \
           -duration {{.DURATION}} -qps {{.QPS}} \
-          -keys https://ohttp-keys.{{.REGION}}.id-infra.world.org/ohttp-keys \
-          -target {{.TARGET_HOST}} \
-          -target-path /health \
-          https://privacy-relay.cloudflare.com/{{.REGION}}-world-id
+          -relay-url https://privacy-relay.cloudflare.com/{{.REGION}}-world-id \
+          -keys-url https://ohttp-keys.{{.REGION}}.id-infra.world.org/ohttp-keys \
+          -target-url https://{{.TARGET_HOST}}/health
