@@ -32,6 +32,8 @@ func main() {
 		os.Exit(runProbe(rootContext(), args))
 	case "load":
 		os.Exit(runLoad(rootContext(), args))
+	case "monitor":
+		os.Exit(runMonitor(rootContext(), args))
 	case "-h", "--help", "help":
 		usage()
 		os.Exit(0)
@@ -54,6 +56,8 @@ Commands:
           gateway) against one or more inner target URLs.
   load    Drive the probe path at a fixed QPS for a fixed duration against
           a single target.
+  monitor Long-running probe loop that exposes Prometheus metrics on a
+          side server. Intended for in-cluster deployment.
 
 Run "ohttp-probe <command> -h" for command-specific flags.
 `)
