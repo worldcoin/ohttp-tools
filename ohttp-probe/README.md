@@ -117,8 +117,8 @@ so absent series don't surprise alerting on a fresh probe.
 `/healthz` on the same address responds 200 for liveness probes.
 
 Cluster-side labels (`env`, `region`, `cluster`) are intentionally omitted
-from the probe metrics — scrape-side relabeling (Datadog Agent
-autodiscovery, Prometheus `relabel_configs`) handles those.
+from the probe metrics — scrape-side relabeling (e.g. Prometheus
+`relabel_configs`) handles those.
 
 ## Shared concepts
 

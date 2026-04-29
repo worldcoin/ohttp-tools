@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"net/http"
@@ -38,6 +39,9 @@ Flags:
 	verbose := fs.Bool("v", false, "verbose output")
 
 	if err := fs.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return 0
+		}
 		return 2
 	}
 	if *relayURL == "" || *keysURL == "" || len(targets) == 0 {

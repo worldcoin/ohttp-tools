@@ -46,7 +46,7 @@ func newMonitorMetrics() *monitorMetrics {
 }
 
 // record observes one probe iteration. Pre-registering the zero-valued
-// counters for every (target, outcome) ensures Datadog sees all three
+// counters for every (target, outcome) ensures consumers see all three
 // outcome series even before the first failure occurs.
 func (m *monitorMetrics) record(target string, elapsed time.Duration, outcome string) {
 	m.duration.WithLabelValues(target).Observe(elapsed.Seconds())
@@ -75,7 +75,7 @@ func runMonitor(ctx context.Context, args []string) int {
 Long-running OHTTP probe. Every -delay, runs one BHTTP round-trip per
 -target-url through -relay-url and records latency and outcome to
 Prometheus metrics on -metrics-addr/metrics. Intended for in-cluster
-deployment with Datadog scraping the side server.
+deployment with a Prometheus-compatible scraper picking up the side server.
 
 Flags:
 `)
@@ -92,6 +92,9 @@ Flags:
 	verbose := fs.Bool("v", false, "verbose output (per-iteration stderr log)")
 
 	if err := fs.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return 0
+		}
 		return 2
 	}
 	if *relayURL == "" || *keysURL == "" || len(targets) == 0 {
@@ -110,7 +113,6 @@ Flags:
 		}
 	}
 
-	client := &http.Client{Timeout: *timeout}
 	metrics := newMonitorMetrics()
 	for _, target := range targets {
 		metrics.preRegisterTarget(target)
@@ -128,7 +130,7 @@ Flags:
 		wg.Add(1)
 		go func(target string) {
 			defer wg.Done()
-			runProbeLoop(loopCtx, client, *relayURL, *keysURL, target, *delay, metrics, *verbose)
+			runProbeLoop(loopCtx, *timeout, *relayURL, *keysURL, target, *delay, metrics, *verbose)
 		}(target)
 	}
 
@@ -148,18 +150,21 @@ Flags:
 	return exit
 }
 
-// runProbeLoop fires probes against target on each tick of delay. Errors
+// runProbeLoop fires probes against target on each tick of delay. Owns the
+// http.Client so its connection pool stays scoped to this goroutine. Errors
 // are surfaced only via the metrics counter (per the task design — alerting
 // is consumer-side, not log-based). Verbose mode opts into per-iteration
 // stderr lines for local diagnosis.
 func runProbeLoop(
 	ctx context.Context,
-	client *http.Client,
+	timeout time.Duration,
 	relayURL, keysURL, target string,
 	delay time.Duration,
 	metrics *monitorMetrics,
 	verbose bool,
 ) {
+	client := &http.Client{Timeout: timeout}
+
 	probeOnce(ctx, client, relayURL, keysURL, target, metrics, verbose)
 
 	ticker := time.NewTicker(delay)
