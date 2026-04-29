@@ -78,6 +78,17 @@ Examples:
     -keys https://ohttp-keys.us.id-infra.worldcoin.dev/ohttp-keys \
     -target indexer.us.id-infra.worldcoin.dev \
     https://staging.privacy-relay.cloudflare.com/us-world-id-stage
+  ohttp-probe -mode relay -monitor -interval 30s -metrics-addr :9090 \
+    -env stage -region us \
+    -keys https://ohttp-keys.us.id-infra.worldcoin.dev/ohttp-keys \
+    -target indexer.us.id-infra.worldcoin.dev \
+    https://staging.privacy-relay.cloudflare.com/us-world-id-stage
+
+Monitor mode (-monitor):
+  Long-running probe loop. Refetches keys and runs one relay/direct round-trip
+  per -interval, exposing latency (histogram) and outcome counters
+  (ok|transport_err|decrypt_err) on -metrics-addr/metrics for Prometheus
+  scraping. Use -env and -region to label metrics. Stops on SIGINT.
 
 Flags:
 `)
@@ -95,6 +106,11 @@ Flags:
 	load := flag.Bool("load", false, "run as load test instead of single probe (relay and direct modes only)")
 	duration := flag.Duration("duration", 30*time.Second, "load test duration (load mode)")
 	qps := flag.Int("qps", 0, "target requests per second (load mode; required, open-model attacker)")
+	monitor := flag.Bool("monitor", false, "run as long-lived monitor that exports Prometheus metrics (relay and direct modes only)")
+	interval := flag.Duration("interval", 30*time.Second, "interval between probes (monitor mode)")
+	metricsAddr := flag.String("metrics-addr", ":9090", "address for the Prometheus metrics server (monitor mode)")
+	envLabel := flag.String("env", "", "value for the env label on exported metrics (monitor mode)")
+	regionLabel := flag.String("region", "", "value for the region label on exported metrics (monitor mode)")
 	flag.Parse()
 
 	targets := flag.Args()
@@ -114,6 +130,10 @@ Flags:
 		os.Exit(1)
 	}
 
+	if *load && *monitor {
+		fmt.Fprintf(os.Stderr, "error: -load and -monitor are mutually exclusive\n")
+		os.Exit(1)
+	}
 	if *load {
 		if *mode != "relay" && *mode != "direct" {
 			fmt.Fprintf(os.Stderr, "error: -load requires -mode relay or direct\n")
@@ -129,6 +149,24 @@ Flags:
 		}
 		if *duration <= 0 {
 			fmt.Fprintf(os.Stderr, "error: -duration must be > 0 (got %s)\n", *duration)
+			os.Exit(1)
+		}
+	}
+	if *monitor {
+		if *mode != "relay" && *mode != "direct" {
+			fmt.Fprintf(os.Stderr, "error: -monitor requires -mode relay or direct\n")
+			os.Exit(1)
+		}
+		if len(targets) != 1 {
+			fmt.Fprintf(os.Stderr, "error: -monitor accepts exactly one <url>, got %d\n", len(targets))
+			os.Exit(1)
+		}
+		if *interval <= 0 {
+			fmt.Fprintf(os.Stderr, "error: -interval must be > 0 (got %s)\n", *interval)
+			os.Exit(1)
+		}
+		if *metricsAddr == "" {
+			fmt.Fprintf(os.Stderr, "error: -metrics-addr must not be empty\n")
 			os.Exit(1)
 		}
 	}
@@ -152,6 +190,35 @@ Flags:
 			bhttpMode(*mode), *qps, *duration, *verbose)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "\nload: %v\n", err)
+			os.Exit(1)
+		}
+		os.Exit(0)
+	}
+
+	if *monitor {
+		base := strings.TrimRight(targets[0], "/")
+		if err := validateBaseURL(base); err != nil {
+			fmt.Fprintf(os.Stderr, "FAIL: %v\n", err)
+			os.Exit(1)
+		}
+		postURL := base
+		if *mode == "direct" {
+			postURL = joinURL(base, pathGateway)
+		}
+		err := runMonitor(ctx, client, monitorOpts{
+			PostURL:     postURL,
+			KeysURL:     *keysURL,
+			TargetHost:  *target,
+			TargetPath:  *targetPath,
+			Mode:        bhttpMode(*mode),
+			Interval:    *interval,
+			MetricsAddr: *metricsAddr,
+			Env:         *envLabel,
+			Region:      *regionLabel,
+			Verbose:     *verbose,
+		})
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "\nmonitor: %v\n", err)
 			os.Exit(1)
 		}
 		os.Exit(0)
@@ -229,7 +296,15 @@ func joinURL(base, path string) string {
 }
 
 func fetchKeys(ctx context.Context, client *http.Client, keysURL string, verbose bool) (ohttp.PublicConfig, error) {
-	if verbose {
+	return fetchKeysSilent(ctx, client, keysURL, verbose, false)
+}
+
+// fetchKeysSilent is fetchKeys with an extra knob: when silent is true, all
+// progress lines are suppressed regardless of verbose. Monitor mode runs the
+// fetch every interval and would otherwise spam stderr with [1/4]/[2/4]
+// lines.
+func fetchKeysSilent(ctx context.Context, client *http.Client, keysURL string, verbose, silent bool) (ohttp.PublicConfig, error) {
+	if verbose && !silent {
 		fmt.Fprintf(os.Stderr, "[1/4] GET %s\n", keysURL)
 	}
 
@@ -252,13 +327,17 @@ func fetchKeys(ctx context.Context, client *http.Client, keysURL string, verbose
 	if keyResp.StatusCode != http.StatusOK {
 		return ohttp.PublicConfig{}, fmt.Errorf("keys endpoint %s returned HTTP %d: %s", keysURL, keyResp.StatusCode, string(keyBytes))
 	}
-	fmt.Fprintf(os.Stderr, "[1/4] fetched %d bytes key config\n", len(keyBytes))
+	if !silent {
+		fmt.Fprintf(os.Stderr, "[1/4] fetched %d bytes key config\n", len(keyBytes))
+	}
 
 	config, err := unmarshalFirstConfig(keyBytes)
 	if err != nil {
 		return ohttp.PublicConfig{}, fmt.Errorf("parse key config: %w", err)
 	}
-	fmt.Fprintf(os.Stderr, "[2/4] parsed OHTTP key config (key_id=%d)\n", config.ID)
+	if !silent {
+		fmt.Fprintf(os.Stderr, "[2/4] parsed OHTTP key config (key_id=%d)\n", config.ID)
+	}
 
 	return config, nil
 }
