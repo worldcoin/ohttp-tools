@@ -3,10 +3,10 @@ package main
 import (
 	"bytes"
 	"context"
+	"flag"
 	"fmt"
 	"io"
 	"net/http"
-	"net/url"
 	"os"
 	"strings"
 	"time"
@@ -37,10 +37,8 @@ func prefixForKind(kind ohttpErrKind) string {
 }
 
 type loadSummary struct {
-	PostURL    string
-	Mode       bhttpMode
-	TargetHost string
-	TargetPath string
+	RelayURL   string
+	TargetURL  string
 	Duration   time.Duration
 	QPS        int
 	Elapsed    time.Duration
@@ -55,18 +53,18 @@ type loadSummary struct {
 
 // ohttpRoundTripper turns each outbound inner request into an OHTTP-wrapped
 // POST: marshal to BHTTP, HPKE-encapsulate with the pre-fetched key config,
-// POST the ciphertext to postURL, and synthesize an *http.Response from the
-// decapsulated inner BHTTP response. Transport and decrypt failures surface as
-// errors with distinct prefixes; inner non-2xx flows through as a normal
+// POST the ciphertext to relayURL, and synthesize an *http.Response from the
+// decapsulated inner BHTTP response. Transport and decrypt failures surface
+// as errors with distinct prefixes; inner non-2xx flows through as a normal
 // response so the status code shows up in vegeta.Result.Code.
 type ohttpRoundTripper struct {
-	inner   *http.Client
-	postURL string
-	config  ohttp.PublicConfig
+	inner    *http.Client
+	relayURL string
+	config   ohttp.PublicConfig
 }
 
 func (t *ohttpRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
-	innerResp, kind, err := doBHTTPRoundTrip(req.Context(), t.inner, t.postURL, t.config, req)
+	innerResp, kind, err := doBHTTPRoundTrip(req.Context(), t.inner, t.relayURL, t.config, req)
 	if err != nil {
 		return nil, fmt.Errorf("%s%w", prefixForKind(kind), err)
 	}
@@ -93,41 +91,85 @@ func (t *ohttpRoundTripper) RoundTrip(req *http.Request) (*http.Response, error)
 	return synth, nil
 }
 
-// runLoad drives the BHTTP probe path (relay or direct mode) at a constant
-// rate of qps requests per second for the given duration, using vegeta's
-// open-model attacker. Keys are fetched once up-front; failure aborts the run.
-func runLoad(
-	ctx context.Context,
-	client *http.Client,
-	postURL, keysURL, targetHost, targetPath string,
-	mode bhttpMode,
-	qps int,
-	duration time.Duration,
-	verbose bool,
-) error {
+// runLoad parses the load subcommand's flags and drives the OHTTP probe path
+// at constant QPS for a fixed duration. Returns process exit code: 0 on
+// success (no failures), 1 if any requests failed, 2 on flag errors.
+func runLoad(ctx context.Context, args []string) int {
+	fs := flag.NewFlagSet("load", flag.ContinueOnError)
+	fs.Usage = func() {
+		fmt.Fprint(os.Stderr, `Usage: ohttp-probe load [flags]
+
+Drive a single -target-url through -relay-url at -qps requests per second
+for -duration, using vegeta's open-model attacker (workers grow with
+offered load, so tail latency isn't masked by a fixed worker pool). Keys
+are fetched once up-front. Prints a summary with p50/p95/p99 latency and
+per-category error counts.
+
+Flags:
+`)
+		fs.PrintDefaults()
+	}
+
+	relayURL := fs.String("relay-url", "", "URL the OHTTP request is POSTed to. Required.")
+	keysURL := fs.String("keys-url", "", "URL of the gateway's OHTTP key config. Required.")
+	targetURL := fs.String("target-url", "", "full inner target URL (single-valued in load mode). Required.")
+	qps := fs.Int("qps", 0, "target requests per second (required, open-model attacker)")
+	duration := fs.Duration("duration", 30*time.Second, "load test duration")
+	timeout := fs.Duration("t", 10*time.Second, "HTTP timeout per request")
+	verbose := fs.Bool("v", false, "verbose output")
+
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	if *relayURL == "" || *keysURL == "" || *targetURL == "" {
+		fmt.Fprintln(os.Stderr, "error: -relay-url, -keys-url, and -target-url are required")
+		fs.Usage()
+		return 2
+	}
+	if *qps < 1 {
+		fmt.Fprintf(os.Stderr, "error: -qps must be >= 1 (got %d)\n", *qps)
+		return 2
+	}
+	if *duration <= 0 {
+		fmt.Fprintf(os.Stderr, "error: -duration must be > 0 (got %s)\n", *duration)
+		return 2
+	}
+	for _, u := range []string{*relayURL, *keysURL, *targetURL} {
+		if err := validateURL(u); err != nil {
+			fmt.Fprintf(os.Stderr, "error: %v\n", err)
+			return 2
+		}
+	}
+
+	client := &http.Client{Timeout: *timeout}
+	if err := executeLoad(ctx, client, *relayURL, *keysURL, *targetURL, *qps, *duration, *verbose); err != nil {
+		fmt.Fprintf(os.Stderr, "\nload: %v\n", err)
+		return 1
+	}
+	return 0
+}
+
+// executeLoad does the actual vegeta run. Split from runLoad so tests can
+// drive the load logic directly without going through flag parsing.
+func executeLoad(ctx context.Context, client *http.Client, relayURL, keysURL, targetURL string, qps int, duration time.Duration, verbose bool) error {
 	fmt.Fprintf(os.Stderr, "load: fetching keys from %s\n", keysURL)
 	config, err := fetchKeys(ctx, client, keysURL, verbose)
 	if err != nil {
 		return fmt.Errorf("key fetch failed (aborting load): %w", err)
 	}
 
-	if !strings.HasPrefix(targetPath, "/") {
-		targetPath = "/" + targetPath
-	}
-	innerURL := (&url.URL{Scheme: "https", Host: targetHost, Path: targetPath}).String()
-
 	ohttpClient := &http.Client{
 		Timeout: client.Timeout,
 		Transport: &ohttpRoundTripper{
-			inner:   client,
-			postURL: postURL,
-			config:  config,
+			inner:    client,
+			relayURL: relayURL,
+			config:   config,
 		},
 	}
 
 	targeter := vegeta.NewStaticTargeter(vegeta.Target{
 		Method: http.MethodGet,
-		URL:    innerURL,
+		URL:    targetURL,
 	})
 	rate := vegeta.Rate{Freq: qps, Per: time.Second}
 	attacker := vegeta.NewAttacker(vegeta.Client(ohttpClient))
@@ -153,10 +195,8 @@ func runLoad(
 	metrics.Close()
 
 	summary := loadSummary{
-		PostURL:    postURL,
-		Mode:       mode,
-		TargetHost: targetHost,
-		TargetPath: targetPath,
+		RelayURL:   relayURL,
+		TargetURL:  targetURL,
 		Duration:   duration,
 		QPS:        qps,
 		Elapsed:    metrics.Duration + metrics.Wait,
@@ -213,9 +253,8 @@ func printLoadSummary(w io.Writer, s loadSummary) {
 
 	pl()
 	pl("=== load summary ===")
-	pf("mode:         %s\n", s.Mode)
-	pf("post URL:     %s\n", s.PostURL)
-	pf("target:       https://%s%s\n", s.TargetHost, s.TargetPath)
+	pf("relay URL:    %s\n", s.RelayURL)
+	pf("target URL:   %s\n", s.TargetURL)
 	pf("rate:         %d rps (target)\n", s.QPS)
 	pf("duration:     %s\n", s.Duration)
 	pf("elapsed:      %s\n", s.Elapsed.Round(time.Millisecond))
