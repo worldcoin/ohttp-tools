@@ -29,15 +29,6 @@ To bump the gateway version, edit `VERSION` in
 `.github/workflows/build-ohttp-gateway.yml` and merge — the workflow rebuilds
 on `main`.
 
-## Deployment
-
-This repo holds tooling only. Cluster wiring lives with the consuming service:
-
-- **Terraform** (ALB, ACM, mTLS, Datadog monitors) — `worldcoin/infrastructure`,
-  under `world-id-protocol/` and `datadog/protocol/`.
-- **Helm values + deploy workflows** — `worldcoin/world-id-protocol-deploy`,
-  under `deploy/`.
-
 ## Local development
 
 The probe is a self-contained Go module — see
