@@ -13,6 +13,7 @@ import (
 	"time"
 
 	ohttp "github.com/chris-wood/ohttp-go"
+	"github.com/cloudflare/circl/hpke"
 	vegeta "github.com/tsenart/vegeta/v12/lib"
 )
 
@@ -113,6 +114,7 @@ Flags:
 	duration := fs.Duration("duration", 30*time.Second, "load test duration")
 	timeout := fs.Duration("t", 10*time.Second, "HTTP timeout per request")
 	verbose := fs.Bool("v", false, "verbose output")
+	kem := fs.String("kem", "auto", "KEM selection: auto, x25519, xwing (explicit selection never falls back)")
 
 	if err := fs.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
@@ -140,8 +142,19 @@ Flags:
 		}
 	}
 
+	var kemID uint16
+	switch *kem {
+	case "auto":
+	case "x25519":
+		kemID = uint16(hpke.KEM_X25519_HKDF_SHA256)
+	case "xwing":
+		kemID = uint16(hpke.KEM_XWING)
+	default:
+		fmt.Fprintln(os.Stderr, "error: -kem must be auto, x25519, or xwing")
+		return 2
+	}
 	client := &http.Client{Timeout: *timeout}
-	if err := executeLoad(ctx, client, *relayURL, *keysURL, *targetURL, *qps, *duration, *verbose); err != nil {
+	if err := executeLoadForKEM(ctx, client, *relayURL, *keysURL, *targetURL, *qps, *duration, *verbose, kemID); err != nil {
 		fmt.Fprintf(os.Stderr, "\nload: %v\n", err)
 		return 1
 	}
@@ -151,11 +164,16 @@ Flags:
 // executeLoad runs the vegeta attack. Split from runLoad so tests can drive
 // it directly without flag parsing.
 func executeLoad(ctx context.Context, client *http.Client, relayURL, keysURL, targetURL string, qps int, duration time.Duration, verbose bool) error {
+	return executeLoadForKEM(ctx, client, relayURL, keysURL, targetURL, qps, duration, verbose, 0)
+}
+
+func executeLoadForKEM(ctx context.Context, client *http.Client, relayURL, keysURL, targetURL string, qps int, duration time.Duration, verbose bool, kemID uint16) error {
 	fmt.Fprintf(os.Stderr, "load: fetching keys from %s\n", keysURL)
-	config, err := fetchKeys(ctx, client, keysURL, verbose)
+	config, err := fetchKeysForKEM(ctx, client, keysURL, verbose, kemID)
 	if err != nil {
 		return fmt.Errorf("key fetch failed (aborting load): %w", err)
 	}
+	fmt.Fprintf(os.Stderr, "load: selected KEM 0x%04x, key_id=%d\n", uint16(config.KEMID), config.ID)
 
 	ohttpClient := &http.Client{
 		Timeout: client.Timeout,

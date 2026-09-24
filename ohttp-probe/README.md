@@ -78,6 +78,10 @@ p50/p95/p99 latency and per-category error counts. Abort with `Ctrl-C`.
   -qps 20 -duration 30s
 ```
 
+Use `-kem x25519` or `-kem xwing` for separate KEM measurements. Explicit
+selection fails if no matching supported configuration is advertised; it
+never falls back. The default `-kem auto` selects the first supported config.
+
 Error categories in the summary:
 
 - `transport` — TCP/TLS errors, client timeouts, outer non-200 from the relay or gateway

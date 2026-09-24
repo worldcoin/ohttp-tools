@@ -14,6 +14,10 @@ import (
 
 // fetchKeys GETs keysURL and returns the first supported HPKE config.
 func fetchKeys(ctx context.Context, client *http.Client, keysURL string, verbose bool) (ohttp.PublicConfig, error) {
+	return fetchKeysForKEM(ctx, client, keysURL, verbose, 0)
+}
+
+func fetchKeysForKEM(ctx context.Context, client *http.Client, keysURL string, verbose bool, kemID uint16) (ohttp.PublicConfig, error) {
 	if verbose {
 		fmt.Fprintf(os.Stderr, "[1/4] GET %s\n", keysURL)
 	}
@@ -38,7 +42,7 @@ func fetchKeys(ctx context.Context, client *http.Client, keysURL string, verbose
 	}
 	fmt.Fprintf(os.Stderr, "[1/4] fetched %d bytes key config\n", len(keyBytes))
 
-	config, err := unmarshalFirstConfig(keyBytes)
+	config, err := unmarshalConfigForKEM(keyBytes, kemID)
 	if err != nil {
 		return ohttp.PublicConfig{}, fmt.Errorf("parse key config: %w", err)
 	}
@@ -50,6 +54,11 @@ func fetchKeys(ctx context.Context, client *http.Client, keysURL string, verbose
 // unmarshalFirstConfig parses a length-prefixed OHTTP key config list and
 // returns the first entry the decoder accepts. RFC 9458 allows multiple.
 func unmarshalFirstConfig(data []byte) (ohttp.PublicConfig, error) {
+	return unmarshalConfigForKEM(data, 0)
+}
+
+// A zero KEM preserves automatic selection; explicit selection never falls back.
+func unmarshalConfigForKEM(data []byte, kemID uint16) (ohttp.PublicConfig, error) {
 	for len(data) >= 2 {
 		configLen := int(binary.BigEndian.Uint16(data[:2]))
 		data = data[2:]
@@ -60,13 +69,13 @@ func unmarshalFirstConfig(data []byte) (ohttp.PublicConfig, error) {
 			return ohttp.PublicConfig{}, fmt.Errorf("truncated key config list")
 		}
 		config, err := ohttp.UnmarshalPublicConfig(data[:configLen])
-		if err == nil {
+		if err == nil && (kemID == 0 || uint16(config.KEMID) == kemID) {
 			return config, nil
 		}
 		data = data[configLen:]
 	}
 
-	return ohttp.PublicConfig{}, fmt.Errorf("no supported key config found")
+	return ohttp.PublicConfig{}, fmt.Errorf("no supported key config found for KEM 0x%04x (0 means auto)", kemID)
 }
 
 // ohttpErrKind classifies doOHTTPRoundTrip failures: transport
