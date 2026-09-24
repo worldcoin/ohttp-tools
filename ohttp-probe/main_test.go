@@ -24,6 +24,39 @@ func newTestGateway(t *testing.T) ohttp.Gateway {
 	return ohttp.NewDefaultGateway([]ohttp.PrivateConfig{cfg})
 }
 
+func TestExplicitKEMSelection(t *testing.T) {
+	var configs [][]byte
+	for id, kem := range []hpke.KEM{hpke.KEM_X25519_HKDF_SHA256, hpke.KEM_XWING} {
+		cfg, err := ohttp.NewConfig(uint8(id), kem, hpke.KDF_HKDF_SHA256, hpke.AEAD_AES128GCM)
+		if err != nil {
+			t.Fatal(err)
+		}
+		gw := ohttp.NewDefaultGateway([]ohttp.PrivateConfig{cfg})
+		configs = append(configs, gw.MarshalConfigs())
+		srv := newOHTTPServer(t, gw)
+		defer srv.Close()
+		selected, err := fetchKeysForKEM(context.Background(), srv.Client(), srv.URL+pathOHTTPKeys, false, uint16(kem))
+		if err != nil {
+			t.Fatal(err)
+		}
+		payload := []byte("round trip")
+		got, _, err := doOHTTPRoundTrip(context.Background(), srv.Client(), srv.URL+pathEcho, selected, payload)
+		if err != nil || !bytes.Equal(got, payload) {
+			t.Fatalf("KEM %x: %q, %v", kem, got, err)
+		}
+	}
+	both := append(append([]byte{}, configs[0]...), configs[1]...)
+	for _, kem := range []hpke.KEM{hpke.KEM_X25519_HKDF_SHA256, hpke.KEM_XWING} {
+		cfg, err := unmarshalConfigForKEM(both, uint16(kem))
+		if err != nil || cfg.KEMID != kem {
+			t.Fatalf("KEM %x: %v", kem, err)
+		}
+	}
+	if _, err := unmarshalConfigForKEM(configs[0], uint16(hpke.KEM_XWING)); err == nil {
+		t.Fatal("must not fall back to X25519")
+	}
+}
+
 func marshalKeyConfigList(configs [][]byte) []byte {
 	var buf []byte
 	for _, c := range configs {
