@@ -9,6 +9,6 @@ RUN go mod download
 COPY *.go ./
 RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /ohttp-probe .
 
-FROM gcr.io/distroless/static:nonroot
+FROM gcr.io/distroless/static-debian13:nonroot
 COPY --from=build /ohttp-probe /ohttp-probe
 ENTRYPOINT ["/ohttp-probe"]
