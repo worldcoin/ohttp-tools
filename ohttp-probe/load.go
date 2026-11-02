@@ -13,7 +13,6 @@ import (
 	"time"
 
 	ohttp "github.com/chris-wood/ohttp-go"
-	"github.com/cloudflare/circl/hpke"
 	vegeta "github.com/tsenart/vegeta/v12/lib"
 )
 
@@ -142,15 +141,9 @@ Flags:
 		}
 	}
 
-	var kemID uint16
-	switch *kem {
-	case "auto":
-	case "x25519":
-		kemID = uint16(hpke.KEM_X25519_HKDF_SHA256)
-	case "xwing":
-		kemID = uint16(hpke.KEM_XWING)
-	default:
-		fmt.Fprintln(os.Stderr, "error: -kem must be auto, x25519, or xwing")
+	kemID, err := parseKEM(*kem)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		return 2
 	}
 	client := &http.Client{Timeout: *timeout}

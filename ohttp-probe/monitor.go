@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -34,26 +35,26 @@ func newMonitorMetrics() *monitorMetrics {
 		Name:    "ohttp_probe_duration_seconds",
 		Help:    "OHTTP probe outer round-trip duration in seconds (excludes key fetch).",
 		Buckets: prometheus.DefBuckets,
-	}, []string{"target"})
+	}, []string{"target", "kem"})
 	requests := prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "ohttp_probe_requests_total",
 		Help: "Total OHTTP probe iterations, labeled by outcome (ok|transport_err|decrypt_err).",
-	}, []string{"target", "outcome"})
+	}, []string{"target", "kem", "outcome"})
 	reg.MustRegister(duration, requests)
 	return &monitorMetrics{registry: reg, duration: duration, requests: requests}
 }
 
 // record observes one round-trip: counter Inc + histogram Observe.
-func (m *monitorMetrics) record(target string, elapsed time.Duration, outcome string) {
-	m.duration.WithLabelValues(target).Observe(elapsed.Seconds())
-	m.requests.WithLabelValues(target, outcome).Inc()
+func (m *monitorMetrics) record(target, kem string, elapsed time.Duration, outcome string) {
+	m.duration.WithLabelValues(target, kem).Observe(elapsed.Seconds())
+	m.requests.WithLabelValues(target, kem, outcome).Inc()
 }
 
 // preRegisterTarget materialises all three outcome counters at 0 so absent
 // series don't surprise alerting on a fresh probe.
-func (m *monitorMetrics) preRegisterTarget(target string) {
+func (m *monitorMetrics) preRegisterTarget(target, kem string) {
 	for _, outcome := range []string{outcomeOK, outcomeTransportErr, outcomeDecryptErr} {
-		m.requests.WithLabelValues(target, outcome).Add(0)
+		m.requests.WithLabelValues(target, kem, outcome).Add(0)
 	}
 }
 
@@ -66,7 +67,7 @@ func runMonitor(ctx context.Context, args []string) int {
 		fmt.Fprint(os.Stderr, `Usage: ohttp-probe monitor [flags]
 
 Long-running OHTTP probe. Fetches the gateway's key config once at startup,
-then on every -delay runs one BHTTP round-trip per -target-url through
+then on every -delay runs one BHTTP round-trip per -target-url and -kem through
 -relay-url and records latency and outcome to Prometheus metrics on
 -metrics-addr/metrics. Intended for in-cluster deployment with a
 Prometheus-compatible scraper picking up the side server.
@@ -84,6 +85,7 @@ Flags:
 	metricsAddr := fs.String("metrics-addr", ":9090", "metrics server bind address")
 	timeout := fs.Duration("t", 10*time.Second, "HTTP timeout per request")
 	verbose := fs.Bool("v", false, "verbose output (per-iteration stderr log)")
+	kems := fs.String("kem", "auto", "comma-separated KEMs to probe: auto, x25519, xwing (explicit selection never falls back)")
 
 	if err := fs.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
@@ -107,16 +109,33 @@ Flags:
 		}
 	}
 
+	var kemIDs []uint16
+	for _, name := range strings.Split(*kems, ",") {
+		id, err := parseKEM(strings.TrimSpace(name))
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "error: %v\n", err)
+			return 2
+		}
+		kemIDs = append(kemIDs, id)
+	}
+
 	keysClient := &http.Client{Timeout: *timeout}
-	config, err := fetchKeys(ctx, keysClient, *keysURL, *verbose)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "monitor: startup key fetch failed: %v\n", err)
-		return 1
+	var configs []ohttp.PublicConfig
+	for _, id := range kemIDs {
+		config, err := fetchKeysForKEM(ctx, keysClient, *keysURL, *verbose, id)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "monitor: startup key fetch failed: %v\n", err)
+			return 1
+		}
+		fmt.Fprintf(os.Stderr, "monitor: probing KEM %s with key_id=%d\n", kemLabel(config.KEMID), config.ID)
+		configs = append(configs, config)
 	}
 
 	metrics := newMonitorMetrics()
-	for _, target := range targets {
-		metrics.preRegisterTarget(target)
+	for _, config := range configs {
+		for _, target := range targets {
+			metrics.preRegisterTarget(target, kemLabel(config.KEMID))
+		}
 	}
 
 	srv, serverErr := startMetricsServer(*metricsAddr, metrics.registry)
@@ -127,12 +146,14 @@ Flags:
 	defer cancelLoops()
 
 	var wg sync.WaitGroup
-	for _, target := range targets {
-		wg.Add(1)
-		go func(target string) {
-			defer wg.Done()
-			runProbeLoop(loopCtx, *timeout, *relayURL, config, target, *delay, metrics, *verbose)
-		}(target)
+	for _, config := range configs {
+		for _, target := range targets {
+			wg.Add(1)
+			go func(config ohttp.PublicConfig, target string) {
+				defer wg.Done()
+				runProbeLoop(loopCtx, *timeout, *relayURL, config, target, *delay, metrics, *verbose)
+			}(config, target)
+		}
 	}
 
 	exit := 0
@@ -198,7 +219,7 @@ func probeOnce(
 	start := time.Now()
 	outcome, code, err := probeIteration(ctx, client, relayURL, config, target)
 	elapsed := time.Since(start)
-	metrics.record(target, elapsed, outcome)
+	metrics.record(target, kemLabel(config.KEMID), elapsed, outcome)
 
 	if !verbose {
 		return

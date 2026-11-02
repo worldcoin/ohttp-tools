@@ -10,7 +10,32 @@ import (
 	"os"
 
 	ohttp "github.com/chris-wood/ohttp-go"
+	"github.com/cloudflare/circl/hpke"
 )
+
+// parseKEM maps a -kem value to a KEM ID; 0 keeps automatic selection.
+func parseKEM(name string) (uint16, error) {
+	switch name {
+	case "auto":
+		return 0, nil
+	case "x25519":
+		return uint16(hpke.KEM_X25519_HKDF_SHA256), nil
+	case "xwing":
+		return uint16(hpke.KEM_XWING), nil
+	}
+	return 0, fmt.Errorf("-kem must be auto, x25519, or xwing (got %q)", name)
+}
+
+// kemLabel names a selected config's KEM for metric labels.
+func kemLabel(kem hpke.KEM) string {
+	switch kem {
+	case hpke.KEM_X25519_HKDF_SHA256:
+		return "x25519"
+	case hpke.KEM_XWING:
+		return "xwing"
+	}
+	return fmt.Sprintf("0x%04x", uint16(kem))
+}
 
 // fetchKeys GETs keysURL and returns the first supported HPKE config.
 func fetchKeys(ctx context.Context, client *http.Client, keysURL string, verbose bool) (ohttp.PublicConfig, error) {
