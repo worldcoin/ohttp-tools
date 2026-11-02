@@ -92,7 +92,7 @@ Error categories in the summary:
 
 Long-running probe loop intended for in-cluster deployment. Fetches the
 gateway's key config once at startup, then on every `-delay` runs one probe
-per `-target-url` (concurrently, one goroutine per target) and records
+per `-target-url` and `-kem` (concurrently, one goroutine each) and records
 latency and outcome to Prometheus metrics on a side server. Latency
 observation is the outer round-trip only — the startup key fetch is *not*
 included. If keys rotate during the probe's lifetime, probes start failing
@@ -108,6 +108,7 @@ counter; `-v` opts into per-iteration stderr lines for local diagnosis.
   -keys-url https://gateway.example.com/ohttp-keys \
   -target-url https://api.example.com/health \
   -target-url https://other-api.example.com/health \
+  -kem x25519,xwing \
   -delay 30s \
   -metrics-addr :9090
 ```
@@ -116,8 +117,13 @@ Metrics on `<metrics-addr>/metrics`:
 
 | Metric | Type | Labels |
 |---|---|---|
-| `ohttp_probe_duration_seconds` | Histogram | `target` |
-| `ohttp_probe_requests_total` | Counter | `target`, `outcome` |
+| `ohttp_probe_duration_seconds` | Histogram | `target`, `kem` |
+| `ohttp_probe_requests_total` | Counter | `target`, `kem`, `outcome` |
+
+`-kem` takes a comma-separated list of `x25519`, `xwing` or `auto` (default:
+the first supported config, as before). Explicit KEMs never fall back, so a
+gateway that stops advertising one fails startup instead of probing another
+key. `kem` is the probed config's KEM (`x25519`, `xwing`, or its hex ID).
 
 `outcome` ∈ `{ok, transport_err, decrypt_err}`. Inner non-2xx (e.g. backend
 `/health` returns 503) is bucketed as `transport_err` — the probe didn't

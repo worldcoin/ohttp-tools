@@ -11,6 +11,8 @@ import (
 	"testing"
 	"time"
 
+	ohttp "github.com/chris-wood/ohttp-go"
+	"github.com/cloudflare/circl/hpke"
 	"github.com/prometheus/client_golang/prometheus"
 	dto "github.com/prometheus/client_model/go"
 )
@@ -102,11 +104,11 @@ func TestProbeIterationDecryptErrOnBadContentType(t *testing.T) {
 func TestMonitorMetricsRecord(t *testing.T) {
 	m := newMonitorMetrics()
 	target := "https://backend.test/health"
-	m.preRegisterTarget(target)
+	m.preRegisterTarget(target, "x25519")
 
-	m.record(target, 123*time.Millisecond, outcomeOK)
-	m.record(target, 456*time.Millisecond, outcomeTransportErr)
-	m.record(target, 789*time.Millisecond, outcomeOK)
+	m.record(target, "x25519", 123*time.Millisecond, outcomeOK)
+	m.record(target, "x25519", 456*time.Millisecond, outcomeTransportErr)
+	m.record(target, "x25519", 789*time.Millisecond, outcomeOK)
 
 	requests := gatherCounterByLabels(t, m.registry, "ohttp_probe_requests_total")
 	if got := requests[counterKey(target, outcomeOK)]; got != 2 {
@@ -132,7 +134,7 @@ func TestMonitorMetricsRecord(t *testing.T) {
 func TestMonitorMetricsPreRegisterMakesAllOutcomesVisible(t *testing.T) {
 	m := newMonitorMetrics()
 	target := "https://backend.test/health"
-	m.preRegisterTarget(target)
+	m.preRegisterTarget(target, "x25519")
 
 	requests := gatherCounterByLabels(t, m.registry, "ohttp_probe_requests_total")
 	for _, outcome := range []string{outcomeOK, outcomeTransportErr, outcomeDecryptErr} {
@@ -186,8 +188,8 @@ func TestRunMonitorEndToEnd(t *testing.T) {
 		raw, _ := io.ReadAll(resp.Body)
 		_ = resp.Body.Close()
 		body = string(raw)
-		if strings.Contains(body, `ohttp_probe_requests_total{outcome="ok"`) &&
-			!strings.Contains(body, `ohttp_probe_requests_total{outcome="ok",target="https://backend.test/health"} 0`) {
+		if strings.Contains(body, `ohttp_probe_requests_total{kem="x25519",outcome="ok"`) &&
+			!strings.Contains(body, `ohttp_probe_requests_total{kem="x25519",outcome="ok",target="https://backend.test/health"} 0`) {
 			break
 		}
 		time.Sleep(20 * time.Millisecond)
@@ -280,6 +282,76 @@ func TestRunMonitorMultiTarget(t *testing.T) {
 	}
 }
 
+func TestRunMonitorProbesEachSelectedKEM(t *testing.T) {
+	var configs []ohttp.PrivateConfig
+	for id, kem := range []hpke.KEM{hpke.KEM_X25519_KYBER768_DRAFT00, hpke.KEM_X25519_HKDF_SHA256, hpke.KEM_XWING} {
+		cfg, err := ohttp.NewConfig(uint8(id), kem, hpke.KDF_HKDF_SHA256, hpke.AEAD_AES128GCM)
+		if err != nil {
+			t.Fatalf("NewConfig: %v", err)
+		}
+		configs = append(configs, cfg)
+	}
+	// Kyber is listed first, as the Go gateway serves it; auto would pick it.
+	gw := ohttp.NewDefaultGateway(configs)
+	backend := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+	relaySrv, keysSrv := newRelayServer(t, gw, backend)
+
+	port, err := freeTCPPort()
+	if err != nil {
+		t.Fatalf("free port: %v", err)
+	}
+	addr := fmt.Sprintf("127.0.0.1:%d", port)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	args := []string{
+		"-relay-url", relaySrv.URL,
+		"-keys-url", keysSrv.URL,
+		"-target-url", "https://backend.test/health",
+		"-kem", "x25519,xwing",
+		"-delay", "20ms",
+		"-metrics-addr", addr,
+	}
+	done := make(chan int, 1)
+	go func() { done <- runMonitor(ctx, args) }()
+
+	okSeries := func(kem string) string {
+		return `ohttp_probe_requests_total{kem="` + kem + `",outcome="ok",target="https://backend.test/health"} `
+	}
+	succeeded := func(body, kem string) bool {
+		return strings.Contains(body, okSeries(kem)) && !strings.Contains(body, okSeries(kem)+"0\n")
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	var body string
+	for time.Now().Before(deadline) {
+		if resp, err := http.Get(fmt.Sprintf("http://%s/metrics", addr)); err == nil {
+			raw, _ := io.ReadAll(resp.Body)
+			_ = resp.Body.Close()
+			body = string(raw)
+			if succeeded(body, "x25519") && succeeded(body, "xwing") {
+				break
+			}
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	for _, kem := range []string{"x25519", "xwing"} {
+		if !succeeded(body, kem) {
+			t.Errorf("no successful %s probes: %q", kem, body)
+		}
+	}
+	if strings.Contains(body, `kem="0x0030"`) {
+		t.Errorf("probed the unselected Kyber config: %q", body)
+	}
+
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("runMonitor did not return after context cancel")
+	}
+}
+
 func TestRunMonitorStartupKeyFetchFailureExits1(t *testing.T) {
 	keysSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "no keys", http.StatusNotFound)
@@ -311,6 +383,10 @@ func TestRunMonitorFlagValidation(t *testing.T) {
 		{"zero delay", []string{
 			"-relay-url", "https://r", "-keys-url", "https://k",
 			"-target-url", "https://t/p", "-delay", "0",
+		}},
+		{"unknown kem", []string{
+			"-relay-url", "https://r", "-keys-url", "https://k",
+			"-target-url", "https://t/p", "-kem", "x25519,kyber",
 		}},
 		{"invalid url scheme", []string{
 			"-relay-url", "ftp://r", "-keys-url", "https://k",
