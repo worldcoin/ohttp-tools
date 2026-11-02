@@ -11,7 +11,7 @@ on:
 
 env:
   CF_REPO: cloudflare/privacy-gateway-server-go
-  VERSION: v0.0.3
+  VERSION: v0.0.4
 
 permissions:
   contents: read
